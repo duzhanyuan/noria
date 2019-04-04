@@ -56,6 +56,13 @@ if you're using [`rustup.rs`](https://rustup.rs/). To build
 $ cargo build --release --bin noria-server
 ```
 
+You may need to install some dependencies for the above to work:
+
+ - clang
+ - libclang-dev
+ - libssl-dev
+ - liblz4-dev
+
 To start a long-running `noria-server` instance, ensure that ZooKeeper
 is running, and then run:
 
@@ -117,7 +124,7 @@ executing data-flow operators (`noria-server/dataflow`). The code in
 establishing materializations, scheduling data-flow work, orchestrating
 Noria program changes, handling failovers, etc.
 
-[`noria-server/lib.rs`](src/lib.rs) has a pretty extensive comment at
+[`noria-server/lib.rs`](noria-server/src/lib.rs) has a pretty extensive comment at
 the top of it that goes through how the Noria internals fit together at
 an implementation level. While it occasionally lags behind, especially
 following larger changes, it should serve to get you familiarized with

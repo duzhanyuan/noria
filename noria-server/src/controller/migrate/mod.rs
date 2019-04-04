@@ -20,21 +20,21 @@
 //!
 //! Beware, Here be dragons™
 
-use crate::controller::ControllerInner;
 use crate::controller::security::SecurityConfig;
+use crate::controller::ControllerInner;
 use dataflow::prelude::*;
-use dataflow::{node, payload};
+use dataflow::{node, prelude::Packet};
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
 
 use petgraph;
 use slog;
 
-pub mod assignment;
-pub mod augmentation;
-pub mod materialization;
-pub mod routing;
-pub mod sharding;
+mod assignment;
+mod augmentation;
+pub(super) mod materialization;
+mod routing;
+mod sharding;
 
 #[derive(Clone)]
 pub(super) enum ColumnChange {
@@ -46,7 +46,8 @@ pub(super) enum ColumnChange {
 ///
 /// Only one `Migration` can be in effect at any point in time. No changes are made to the running
 /// graph until the `Migration` is committed (using `Migration::commit`).
-pub struct Migration<'a> {
+// crate viz for tests
+crate struct Migration<'a> {
     pub(super) mainline: &'a mut ControllerInner,
     pub(super) added: Vec<NodeIndex>,
     pub(super) columns: Vec<(NodeIndex, ColumnChange)>,
@@ -66,22 +67,21 @@ impl<'a> Migration<'a> {
     /// The returned identifier can later be used to refer to the added ingredient.
     /// Edges in the data flow graph are automatically added based on the ingredient's reported
     /// `ancestors`.
-    pub fn add_ingredient<S1, FS, S2, I>(&mut self, name: S1, fields: FS, mut i: I) -> NodeIndex
+    // crate viz for tests
+    crate fn add_ingredient<S1, FS, S2, I>(&mut self, name: S1, fields: FS, i: I) -> NodeIndex
     where
         S1: ToString,
         S2: ToString,
         FS: IntoIterator<Item = S2>,
-        I: Ingredient + Into<NodeOperator>,
+        I: Into<NodeOperator>,
     {
+        let mut i = node::Node::new(name.to_string(), fields, i.into());
         i.on_connected(&self.mainline.ingredients);
         let parents = i.ancestors();
         assert!(!parents.is_empty());
 
         // add to the graph
-        let ni =
-            self.mainline
-                .ingredients
-                .add_node(node::Node::new(name.to_string(), fields, i.into()));
+        let ni = self.mainline.ingredients.add_node(i);
         info!(self.log,
               "adding new node";
               "node" => ni.index(),
@@ -95,13 +95,14 @@ impl<'a> Migration<'a> {
             self.mainline.ingredients.add_edge(parent, ni, ());
         }
         // and tell the caller its id
-        ni.into()
+        ni
     }
 
     /// Add the given `Base` to the Soup.
     ///
     /// The returned identifier can later be used to refer to the added ingredient.
-    pub fn add_base<S1, FS, S2>(
+    // crate viz for tests
+    crate fn add_base<S1, FS, S2>(
         &mut self,
         name: S1,
         fields: FS,
@@ -112,7 +113,6 @@ impl<'a> Migration<'a> {
         S2: ToString,
         FS: IntoIterator<Item = S2>,
     {
-
         // add to the graph
         let ni = self
             .mainline
@@ -124,9 +124,11 @@ impl<'a> Migration<'a> {
               "node" => ni.index(),
         );
 
-        // don't add user or group context tables 
+        // don't add user or group context tables
         if !name.to_string().contains("UserContext") && !name.to_string().contains("GroupContext") {
-            self.mainline.base_nodes.insert(name.to_string(), ni.clone());
+            self.mainline
+                .base_nodes
+                .insert(name.to_string(), ni.clone());
         }
 
         // keep track of the fact that it's new
@@ -136,18 +138,17 @@ impl<'a> Migration<'a> {
             .ingredients
             .add_edge(self.mainline.source, ni, ());
         // and tell the caller its id
-
-        ni.into()
+        ni
     }
 
     /// Returns the context of this migration
-    pub fn context(&self) -> &HashMap<String, DataType> {
+    pub(super) fn context(&self) -> &HashMap<String, DataType> {
         &self.context
     }
 
     /// Returns the universe in which this migration is operating in.
     /// If not specified, assumes `global` universe.
-    pub fn universe(&self) -> (DataType, Option<DataType>) {
+    pub(super) fn universe(&self) -> (DataType, Option<DataType>) {
         let id = match self.context.get("id") {
             Some(id) => id.clone(),
             None => "global".into(),
@@ -165,7 +166,8 @@ impl<'a> Migration<'a> {
     ///
     /// Note that a default value must be provided such that old writes can be converted into this
     /// new type.
-    pub fn add_column<S: ToString>(
+    // crate viz for tests
+    crate fn add_column<S: ToString>(
         &mut self,
         node: NodeIndex,
         field: S,
@@ -194,7 +196,8 @@ impl<'a> Migration<'a> {
     }
 
     /// Drop a column from a base node.
-    pub fn drop_column(&mut self, node: NodeIndex, column: usize) {
+    // crate viz for tests
+    crate fn drop_column(&mut self, node: NodeIndex, column: usize) {
         // not allowed to drop columns from new nodes
         assert!(!self.added.iter().any(|&ni| ni == node));
 
@@ -211,12 +214,14 @@ impl<'a> Migration<'a> {
     }
 
     #[cfg(test)]
-    pub fn graph(&self) -> &Graph {
+    crate fn graph(&self) -> &Graph {
         self.mainline.graph()
     }
 
     fn ensure_reader_for(&mut self, n: NodeIndex, name: Option<String>) {
-        if !self.readers.contains_key(&n) {
+        use std::collections::hash_map::Entry;
+        if let Entry::Vacant(e) = self.readers.entry(n) {
+            // make a reader
             let r = node::special::Reader::new(n);
             // println!("query to readers: {:?}", self.mainline.map_meta.query_to_readers);
             // make a reader
@@ -233,7 +238,7 @@ impl<'a> Migration<'a> {
             self.mainline.ingredients.add_edge(n, r, ());
 
             let mut query_hash = HashSet::new();
-            for (k, v) in self.mainline.map_meta.query_to_readers.clone(){
+            for (k, v) in self.mainline.map_meta.query_to_readers.clone() {
                 query_hash.insert(k.clone());
             }
 
@@ -246,7 +251,7 @@ impl<'a> Migration<'a> {
                             general_query = Some(k);
                         }
                     }
-                },
+                }
                 None => {}
             }
 
@@ -262,13 +267,18 @@ impl<'a> Migration<'a> {
                             let mut new_set = HashSet::new();
                             new_set.insert(r);
                             add = true;
-                            added_set = Some(new_set); true }
+                            added_set = Some(new_set);
+                            true
+                        }
                     };
                     if add {
-                        self.mainline.map_meta.query_to_readers.insert(name_.clone(), added_set.unwrap());
+                        self.mainline
+                            .map_meta
+                            .query_to_readers
+                            .insert(name_.clone(), added_set.unwrap());
                     }
                     matched = true;
-                },
+                }
                 None => {}
             }
 
@@ -284,18 +294,23 @@ impl<'a> Migration<'a> {
                                 let mut new_set = HashSet::new();
                                 new_set.insert(r);
                                 add = true;
-                                added_set = Some(new_set); true }
+                                added_set = Some(new_set);
+                                true
+                            }
                         };
                         if add {
-                            self.mainline.map_meta.query_to_readers.insert(name_.clone(), added_set.unwrap());
+                            self.mainline
+                                .map_meta
+                                .query_to_readers
+                                .insert(name_.clone(), added_set.unwrap());
                         }
-                    },
+                    }
                     None => {}
                 }
             }
 
             // println!("name: {:?}, reader: {:?}", n, r);
-            self.readers.insert(n, r);
+            e.insert(r);
         }
     }
 
@@ -303,7 +318,7 @@ impl<'a> Migration<'a> {
     ///
     /// To query into the maintained state, use `ControllerInner::get_getter`.
     #[cfg(test)]
-    pub fn maintain_anonymous(&mut self, n: NodeIndex, key: &[usize]) -> NodeIndex {
+    crate fn maintain_anonymous(&mut self, n: NodeIndex, key: &[usize]) -> NodeIndex {
         self.ensure_reader_for(n, None);
         let ri = self.readers[&n];
 
@@ -317,7 +332,7 @@ impl<'a> Migration<'a> {
     /// Set up the given node such that its output can be efficiently queried.
     ///
     /// To query into the maintained state, use `ControllerInner::get_getter`.
-    pub fn maintain(&mut self, name: String, n: NodeIndex, key: &[usize]) {
+    pub(super) fn maintain(&mut self, name: String, n: NodeIndex, key: &[usize]) {
         self.ensure_reader_for(n, Some(name));
 
         let ri = self.readers[&n];
@@ -329,15 +344,18 @@ impl<'a> Migration<'a> {
         if uid != "global".to_string() {
             uint = uid.parse().unwrap();
         }
-        let uid : usize = uint as usize;
+        let uid: usize = uint as usize;
 
-        self.mainline.map_meta.reader_to_uid.insert(ri.clone(), uid.clone());
+        self.mainline
+            .map_meta
+            .reader_to_uid
+            .insert(ri.clone(), uid.clone());
 
         let mut leaf_to_query = HashMap::new();
         for (query_n, node_list) in self.mainline.map_meta.query_to_leaves.iter() {
-           for node in node_list.clone() {
-               leaf_to_query.insert(node, query_n);
-           }
+            for node in node_list.clone() {
+                leaf_to_query.insert(node, query_n);
+            }
         }
         // match leaf_to_query.get(&n.clone()) {
         //     Some(query) => {
@@ -367,7 +385,8 @@ impl<'a> Migration<'a> {
     /// This will spin up an execution thread for each new thread domain, and hook those new
     /// domains into the larger Soup graph. The returned map contains entry points through which
     /// new updates should be sent to introduce them into the Soup.
-    pub fn commit(self) {
+    #[allow(clippy::cyclomatic_complexity)]
+    pub(super) fn commit(self) {
         info!(self.log, "finalizing migration"; "#nodes" => self.added.len());
         // println!("in migration::commit. query_to_readers: {:?}", self.mainline.map_meta.query_to_readers.clone());
 
@@ -395,11 +414,7 @@ impl<'a> Migration<'a> {
         };
 
         // Assign domains
-        assignment::assign(
-            &log,
-            &mut mainline,
-            &new,
-        );
+        assignment::assign(&log, &mut mainline, &new);
 
         // Set up ingress and egress nodes
         let swapped1 = routing::add(&log, &mut mainline.ingredients, mainline.source, &mut new);
@@ -617,14 +632,14 @@ impl<'a> Migration<'a> {
             for ni in inform {
                 let n = &mainline.ingredients[ni];
                 let m = match change.clone() {
-                    ColumnChange::Add(field, default) => box payload::Packet::AddBaseColumn {
+                    ColumnChange::Add(field, default) => box Packet::AddBaseColumn {
                         node: n.local_addr(),
-                        field: field,
-                        default: default,
+                        field,
+                        default,
                     },
-                    ColumnChange::Drop(column) => box payload::Packet::DropBaseColumn {
+                    ColumnChange::Drop(column) => box Packet::DropBaseColumn {
                         node: n.local_addr(),
-                        column: column,
+                        column,
                     },
                 };
 

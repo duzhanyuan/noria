@@ -8,12 +8,12 @@ use std::collections::HashMap;
 
 pub trait SecurityBoundary {
     fn reconcile(
-    &mut self,
-    name: &str,
-    qg: &QueryGraph,
-    ancestors: &Vec<MirNodeRef>,
-    node_count: usize,
-    sec: bool,
+        &mut self,
+        name: &str,
+        qg: &QueryGraph,
+        ancestors: &[MirNodeRef],
+        node_count: usize,
+        sec: bool,
     ) -> (
         Vec<MirNodeRef>,
         Option<HashMap<(String, Option<String>), String>>,
@@ -33,7 +33,7 @@ impl SecurityBoundary for SqlToMirConverter {
         &mut self,
         name: &str,
         qg: &QueryGraph,
-        ancestors: &Vec<MirNodeRef>,
+        ancestors: &[MirNodeRef],
         node_count: usize,
         sec: bool,
     ) -> (
@@ -107,7 +107,8 @@ impl SecurityBoundary for SqlToMirConverter {
             return Ok((vec![prev_node], security_nodes));
         }
 
-        for (rel, _) in &node_for_rel.clone() {
+        // TODO(jfrg): why is this okay? we're iterating over keys of a collection we're modifying
+        for rel in node_for_rel.clone().keys() {
             let (last_nodes, nodes) =
                 make_security_nodes(self, *rel, &prev_node, node_for_rel.clone())?;
             debug!(
@@ -186,7 +187,10 @@ fn make_security_nodes(
             if *rel == "computed_columns" {
                 continue;
             }
-            if local_node_for_rel.contains_key(*rel) && !rel.contains("UserContext") && !rel.contains("GroupContext") {
+            if local_node_for_rel.contains_key(*rel)
+                && !rel.contains("UserContext")
+                && !rel.contains("GroupContext")
+            {
                 local_node_for_rel.insert(*rel, prev_node.clone().unwrap());
                 continue;
             }
@@ -283,7 +287,10 @@ fn make_security_nodes(
             .chain(rewrite_nodes.into_iter())
             .collect();
 
-        assert!(policy_nodes.len() > 0, "no nodes where created for policy");
+        assert!(
+            !policy_nodes.is_empty(),
+            "no nodes where created for policy"
+        );
 
         security_nodes.extend(policy_nodes.clone());
         last_policy_nodes.push(policy_nodes.last().unwrap().clone())

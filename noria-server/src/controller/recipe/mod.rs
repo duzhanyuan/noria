@@ -1,9 +1,8 @@
+use crate::controller::security::policy::Policy;
 use crate::controller::security::SecurityConfig;
-use crate::controller::sql::reuse::ReuseConfigType;
 use crate::controller::sql::SqlIncorporator;
 use crate::controller::Migration;
-use crate::controller::security::policy::Policy;
-
+use crate::ReuseConfigType;
 use dataflow::ops::trigger::Trigger;
 use dataflow::ops::trigger::TriggerEvent;
 use dataflow::prelude::DataType;
@@ -17,15 +16,15 @@ use nom_sql::CreateTableStatement;
 use slog;
 use std::collections::HashMap;
 use std::str;
+use std::time::Instant;
 use std::vec::Vec;
-use std::time::{Duration, Instant};
-
 
 type QueryID = u64;
 
 /// Represents a Soup recipe.
 #[derive(Clone, Debug)]
-pub struct Recipe {
+// crate viz for tests
+crate struct Recipe {
     /// SQL queries represented in the recipe. Value tuple is (name, query, public).
     expressions: HashMap<QueryID, (Option<String>, SqlQuery, bool)>,
     /// Addition order for the recipe expressions
@@ -60,7 +59,7 @@ impl PartialEq for Recipe {
 }
 
 #[derive(Debug)]
-pub enum Schema {
+pub(super) enum Schema {
     Table(CreateTableStatement),
     View(Vec<String>),
 }
@@ -76,7 +75,7 @@ fn hash_query(q: &SqlQuery) -> QueryID {
 
 #[inline]
 fn is_ident(chr: u8) -> bool {
-    is_alphanumeric(chr) || chr == '_' as u8
+    is_alphanumeric(chr) || chr as char == '_'
 }
 
 named!(query_expr<&[u8], (bool, Option<String>, SqlQuery)>,
@@ -101,7 +100,7 @@ named!(query_expr<&[u8], (bool, Option<String>, SqlQuery)>,
 #[allow(unused)]
 impl Recipe {
     /// Return security groups in the recipe
-    pub fn security_groups(&self) -> Vec<String> {
+    pub(in crate::controller) fn security_groups(&self) -> Vec<String> {
         match self.security_config {
             Some(ref config) => config.groups.keys().cloned().collect(),
             None => vec![],
@@ -109,13 +108,14 @@ impl Recipe {
     }
 
     /// Return active aliases for expressions
-    pub fn aliases(&self) -> Vec<&str> {
+    fn aliases(&self) -> Vec<&str> {
         self.aliases.keys().map(String::as_str).collect()
     }
 
     /// Creates a blank recipe. This is useful for bootstrapping, e.g., in interactive
     /// settings, and for temporary recipes.
-    pub fn blank(log: Option<slog::Logger>) -> Recipe {
+    // crate viz for tests
+    crate fn blank(log: Option<slog::Logger>) -> Recipe {
         Recipe {
             expressions: HashMap::default(),
             expression_order: Vec::default(),
@@ -134,7 +134,7 @@ impl Recipe {
         }
     }
 
-    pub fn with_version(version: usize, log: Option<slog::Logger>) -> Recipe {
+    pub(super) fn with_version(version: usize, log: Option<slog::Logger>) -> Recipe {
         Recipe {
             version,
             ..Self::blank(log)
@@ -144,17 +144,18 @@ impl Recipe {
     /// Set the `Logger` to use for internal log messages.
     ///
     /// By default, all log messages are discarded.
-    pub fn log_with(&mut self, log: slog::Logger) {
+    fn log_with(&mut self, log: slog::Logger) {
         self.log = log;
     }
 
     /// Disable node reuse.
-    pub fn disable_reuse(&mut self) {
+    // crate viz for tests
+    crate fn disable_reuse(&mut self) {
         self.inc.as_mut().unwrap().disable_reuse();
     }
 
     /// Enable reuse
-    pub fn enable_reuse(&mut self, reuse_type: ReuseConfigType) {
+    pub(super) fn enable_reuse(&mut self, reuse_type: ReuseConfigType) {
         self.inc.as_mut().unwrap().enable_reuse(reuse_type)
     }
 
@@ -166,7 +167,7 @@ impl Recipe {
     }
 
     /// Obtains the `NodeIndex` for the node corresponding to a named query or a write type.
-    pub fn node_addr_for(&self, name: &str) -> Result<NodeIndex, String> {
+    pub(in crate::controller) fn node_addr_for(&self, name: &str) -> Result<NodeIndex, String> {
         match self.inc {
             Some(ref inc) => {
                 // `name` might be an alias for another identical query, so resolve if needed
@@ -182,12 +183,12 @@ impl Recipe {
                     Some(na) => Ok(na),
                 }
             }
-            None => Err(format!("Recipe not applied")),
+            None => Err("Recipe not applied".to_string()),
         }
     }
 
     /// Get schema for a base table or view in the recipe.
-    pub fn schema_for(&self, name: &str) -> Option<Schema> {
+    pub(super) fn schema_for(&self, name: &str) -> Option<Schema> {
         let inc = self.inc.as_ref().expect("Recipe not applied");
         match inc.get_base_schema(name) {
             None => {
@@ -195,23 +196,23 @@ impl Recipe {
                     None => inc.get_view_schema(name),
                     Some(ref internal_qn) => inc.get_view_schema(internal_qn),
                 };
-                s.map(|s| Schema::View(s))
+                s.map(Schema::View)
             }
             Some(s) => Some(Schema::Table(s)),
         }
     }
 
     /// Set recipe's security configuration
-    pub fn set_security_config(&mut self, config_text: &str, url: String) {
+    pub(in crate::controller) fn set_security_config(&mut self, config_text: &str) {
         let mut config = SecurityConfig::parse(config_text);
-        config.url = url;
         self.security_config = Some(config);
     }
 
     /// Creates a recipe from a set of SQL queries in a string (e.g., read from a file).
     /// Note that the recipe is not backed by a Soup data-flow graph until `activate` is called on
     /// it.
-    pub fn from_str(recipe_text: &str, log: Option<slog::Logger>) -> Result<Recipe, String> {
+    // crate viz for tests
+    crate fn from_str(recipe_text: &str, log: Option<slog::Logger>) -> Result<Recipe, String> {
         // remove comment lines
         let lines: Vec<String> = recipe_text
             .lines()
@@ -230,7 +231,7 @@ impl Recipe {
     /// Creates a recipe from a set of pre-parsed `SqlQuery` structures.
     /// Note that the recipe is not backed by a Soup data-flow graph until `activate` is called on
     /// it.
-    pub fn from_queries(
+    fn from_queries(
         qs: Vec<(Option<String>, SqlQuery, bool)>,
         log: Option<slog::Logger>,
     ) -> Recipe {
@@ -257,7 +258,7 @@ impl Recipe {
                         aliases.insert(name.clone(), qid);
                     }
                 }
-                (qid.into(), (n, q, is_leaf))
+                (qid, (n, q, is_leaf))
             })
             .collect::<HashMap<QueryID, (Option<String>, SqlQuery, bool)>>();
 
@@ -274,19 +275,19 @@ impl Recipe {
         debug!(log, "{} duplicate queries", duplicates; "version" => 0);
 
         Recipe {
-            expressions: expressions,
-            expression_order: expression_order,
-            aliases: aliases,
+            expressions,
+            expression_order,
+            aliases,
             security_config: None,
             version: 0,
             prior: None,
             inc: Some(inc),
-            log: log,
+            log,
         }
     }
 
     /// Creates a new security universe
-    pub fn create_universe(
+    pub(in crate::controller) fn create_universe(
         &mut self,
         mig: &mut Migration,
         universe_groups: HashMap<String, Vec<DataType>>,
@@ -330,11 +331,12 @@ impl Recipe {
                     Some(ref g) => {
                         let in_group = true;
                         Some(format!(
-                        "{}_{}{}",
-                        n.clone().unwrap(),
-                        g.to_string(),
-                        id.to_string()
-                    ))},
+                            "{}_{}{}",
+                            n.clone().unwrap(),
+                            g.to_string(),
+                            id.to_string()
+                        ))
+                    }
                     None => Some(format!("{}_u{}", n.clone().unwrap(), id.to_string())),
                 }
             } else {
@@ -344,11 +346,13 @@ impl Recipe {
             // println!("recipe: creating universe 3. {:?}", now.elapsed().as_nanos());
 
             let is_leaf = if group.is_some() { false } else { is_leaf };
-            let qfp = self
-                .inc
-                .as_mut()
-                .unwrap()
-                .add_parsed_query(q, new_name.clone(), is_leaf, mig, n.clone())?;
+            let qfp = self.inc.as_mut().unwrap().add_parsed_query(
+                q,
+                new_name.clone(),
+                is_leaf,
+                mig,
+                n.clone(),
+            )?;
 
             // println!("recipe: creating universe 4. {:?}", now.elapsed().as_nanos());
             // If the user provided us with a query name, use that.
@@ -366,24 +370,21 @@ impl Recipe {
         if self.security_config.is_some() {
             for policy in &self.security_config.clone().unwrap().policies {
                 match policy {
-                    Policy::Write(inner) => {
-                        match mig.mainline.base_nodes.get(&inner.table) {
-                            Some(ni) => {
-                                let n = &mig.mainline.ingredients[*ni];
-                                let m = box payload::Packet::SetWritePolicy {
-                                    node: n.local_addr(),
-                                    predicate: inner.predicate.clone(),
-                                };
+                    Policy::Write(inner) => match mig.mainline.base_nodes.get(&inner.table) {
+                        Some(ni) => {
+                            let n = &mig.mainline.ingredients[*ni];
+                            let m = box payload::Packet::SetWritePolicy {
+                                node: n.local_addr(),
+                                predicate: inner.predicate.clone(),
+                            };
 
-                                let domain = mig.mainline.domains.get_mut(&n.domain()).unwrap();
-                                domain.send_to_healthy(m, &mig.mainline.workers).unwrap();
-                                mig.mainline.replies.wait_for_acks(&domain);
-
-                            },
-                            None => {},
+                            let domain = mig.mainline.domains.get_mut(&n.domain()).unwrap();
+                            domain.send_to_healthy(m, &mig.mainline.workers).unwrap();
+                            mig.mainline.replies.wait_for_acks(&domain);
                         }
+                        None => {}
                     },
-                    _ => {},
+                    _ => {}
                 }
             }
         }
@@ -394,7 +395,8 @@ impl Recipe {
     /// Activate the recipe by migrating the Soup data-flow graph wrapped in `mig` to the recipe.
     /// This causes all necessary changes to said graph to be applied; however, it is the caller's
     /// responsibility to call `mig.commit()` afterwards.
-    pub fn activate(&mut self, mig: &mut Migration) -> Result<ActivationResult, String> {
+    // crate viz for tests
+    crate fn activate(&mut self, mig: &mut Migration) -> Result<ActivationResult, String> {
         debug!(self.log, "{} queries, {} of which are named",
                                  self.expressions.len(),
                                  self.aliases.len(); "version" => self.version);
@@ -439,12 +441,11 @@ impl Recipe {
                     Some(group.name()),
                     true,
                     mig,
-                    None
+                    None,
                 )?;
 
                 /// Add trigger node below group membership views
                 let group_creation = TriggerEvent::GroupCreation {
-                    controller_url: config.url.clone(),
                     group: group.name(),
                 };
                 let trigger = Trigger::new(qfp.query_leaf, group_creation, 1);
@@ -467,11 +468,13 @@ impl Recipe {
             let (n, q, is_leaf) = self.expressions[&qid].clone();
 
             // add the query
-            let qfp = self
-                .inc
-                .as_mut()
-                .unwrap()
-                .add_parsed_query(q, n.clone(), is_leaf, mig, n.clone())?;
+            let qfp = self.inc.as_mut().unwrap().add_parsed_query(
+                q,
+                n.clone(),
+                is_leaf,
+                mig,
+                n.clone(),
+            )?;
 
             // If the user provided us with a query name, use that.
             // If not, use the name internally used by the QFP.
@@ -540,7 +543,8 @@ impl Recipe {
     }
 
     /// Returns the query expressions in the recipe.
-    pub fn expressions(&self) -> Vec<(Option<&String>, &SqlQuery)> {
+    // crate viz for tests
+    crate fn expressions(&self) -> Vec<(Option<&String>, &SqlQuery)> {
         self.expressions
             .values()
             .map(|&(ref n, ref q, _)| (n.as_ref(), q))
@@ -551,7 +555,8 @@ impl Recipe {
     /// `additions`, and if successful, will extend the recipe. No expressions are removed from the
     /// recipe; use `replace` if removal of unused expressions is desired.
     /// Consumes `self` and returns a replacement recipe.
-    pub fn extend(mut self, additions: &str) -> Result<Recipe, (Recipe, String)> {
+    // crate viz for tests
+    crate fn extend(mut self, additions: &str) -> Result<Recipe, (Recipe, String)> {
         // parse and compute differences to current recipe
         let add_rp = match Recipe::from_str(additions, None) {
             Ok(rp) => rp,
@@ -597,27 +602,27 @@ impl Recipe {
 
     /// Helper method to reparent a recipe. This is needed for the recovery logic to build
     /// recovery and original recipe (see `make_recovery`).
-    pub(crate) fn set_prior(&mut self, new_prior: Recipe) {
+    pub(in crate::controller) fn set_prior(&mut self, new_prior: Recipe) {
         self.prior = Some(Box::new(new_prior));
     }
 
     /// Helper method to reparent a recipe. This is needed for some of t
-    pub(crate) fn sql_inc(&self) -> &SqlIncorporator {
+    pub(super) fn sql_inc(&self) -> &SqlIncorporator {
         self.inc.as_ref().unwrap()
     }
 
     /// Helper method to reparent a recipe. This is needed for some of t
-    pub(crate) fn set_sql_inc(&mut self, new_inc: SqlIncorporator) {
+    pub(in crate::controller) fn set_sql_inc(&mut self, new_inc: SqlIncorporator) {
         self.inc = Some(new_inc);
     }
 
     fn parse(recipe_text: &str) -> Result<Vec<(Option<String>, SqlQuery, bool)>, String> {
         let lines: Vec<&str> = recipe_text
             .lines()
-            .filter(|l| !l.is_empty() && !l.starts_with("#"))
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
             .map(|l| {
                 // remove inline comments, too
-                match l.find("#") {
+                match l.find('#') {
                     None => l.trim(),
                     Some(pos) => &l[0..pos - 1].trim(),
                 }
@@ -626,7 +631,7 @@ impl Recipe {
         let mut query_strings = Vec::new();
         let mut q = String::new();
         for l in lines {
-            if !l.ends_with(";") {
+            if !l.ends_with(';') {
                 q.push_str(l);
                 q.push_str(" ");
             } else {
@@ -639,20 +644,20 @@ impl Recipe {
 
         let parsed_queries = query_strings
             .iter()
-            .map(|ref q| (q.clone(), query_expr(q.as_bytes())))
+            .map(|q| (q, query_expr(q.as_bytes())))
             .collect::<Vec<_>>();
 
         if !parsed_queries.iter().all(|pq| pq.1.is_done()) {
             for pq in parsed_queries {
                 match pq.1 {
                     nom::IResult::Error(e) => {
-                        return Err(format!("Query \"{}\", parse error: {}", pq.0, e))
+                        return Err(format!("Query \"{}\", parse error: {}", pq.0, e));
                     }
                     nom::IResult::Done(_, _) => (),
                     nom::IResult::Incomplete(_) => unreachable!(),
                 }
             }
-            return Err(format!("Failed to parse recipe!"));
+            return Err("Failed to parse recipe!".to_string());
         }
 
         Ok(parsed_queries
@@ -665,11 +670,12 @@ impl Recipe {
     }
 
     /// Returns the predecessor from which this `Recipe` was migrated to.
-    pub fn prior(&self) -> Option<&Box<Recipe>> {
-        self.prior.as_ref()
+    // crate viz for tests
+    crate fn prior(&self) -> Option<&Recipe> {
+        self.prior.as_ref().map(|p| &**p)
     }
 
-    pub(crate) fn remove_query(&mut self, qname: &str) -> bool {
+    fn remove_query(&mut self, qname: &str) -> bool {
         let qid = self.aliases.get(qname).cloned();
         if qid.is_none() {
             warn!(self.log, "Query {} not found in expressions", qname);
@@ -685,7 +691,7 @@ impl Recipe {
     /// contained in `new` (but not in `self`) will be added; any contained in `self`, but not in
     /// `new` will be removed.
     /// Consumes `self` and returns a replacement recipe.
-    pub fn replace(mut self, mut new: Recipe) -> Result<Recipe, String> {
+    pub(super) fn replace(mut self, mut new: Recipe) -> Result<Recipe, String> {
         // generate replacement recipe with correct version and lineage
         new.version = self.version + 1;
         // retain the old incorporator but move it to the new recipe
@@ -702,18 +708,19 @@ impl Recipe {
     }
 
     /// Increments the version of a recipe. Returns the new version number.
-    pub fn next(&mut self) -> usize {
+    pub(super) fn next(&mut self) -> usize {
         self.version += 1;
         self.version
     }
 
     /// Returns the version number of this recipe.
-    pub fn version(&self) -> usize {
+    // crate viz for tests
+    crate fn version(&self) -> usize {
         self.version
     }
 
     /// Reverts to prior version of recipe
-    pub fn revert(self) -> Recipe {
+    pub(super) fn revert(self) -> Recipe {
         if let Some(prior) = self.prior {
             *prior
         } else {
@@ -721,7 +728,7 @@ impl Recipe {
         }
     }
 
-    pub(crate) fn queries_for_nodes(&self, nodes: Vec<NodeIndex>) -> Vec<String> {
+    pub(super) fn queries_for_nodes(&self, nodes: Vec<NodeIndex>) -> Vec<String> {
         nodes
             .iter()
             .flat_map(|ni| {
@@ -733,7 +740,7 @@ impl Recipe {
             .collect()
     }
 
-    pub(crate) fn make_recovery(&self, mut affected_queries: Vec<String>) -> (Recipe, Recipe) {
+    pub(super) fn make_recovery(&self, mut affected_queries: Vec<String>) -> (Recipe, Recipe) {
         affected_queries.sort();
         affected_queries.dedup();
 

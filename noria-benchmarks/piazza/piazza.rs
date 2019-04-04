@@ -1,7 +1,9 @@
+#![feature(duration_float)]
+
 #[macro_use]
 extern crate clap;
 
-use noria::{ControllerBuilder, DataType, LocalAuthority, LocalControllerHandle, ReuseConfigType};
+use noria::{Builder, DataType, LocalAuthority, ReuseConfigType, SyncHandle};
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Write;
@@ -10,10 +12,10 @@ use std::{thread, time};
 #[macro_use]
 mod populate;
 
-use crate::populate::{Populate, NANOS_PER_SEC};
+use crate::populate::Populate;
 
 pub struct Backend {
-    g: LocalControllerHandle<LocalAuthority>,
+    g: SyncHandle<LocalAuthority>,
 }
 
 #[derive(PartialEq)]
@@ -25,7 +27,7 @@ enum PopulateType {
 
 impl Backend {
     pub fn new(partial: bool, _shard: bool, reuse: &str) -> Backend {
-        let mut cb = ControllerBuilder::default();
+        let mut cb = Builder::default();
         let log = noria::logger_pls();
         let blender_log = log.clone();
 
@@ -33,7 +35,7 @@ impl Backend {
             cb.disable_partial();
         }
 
-        match reuse.as_ref() {
+        match reuse {
             "finkelstein" => cb.set_reuse(ReuseConfigType::Finkelstein),
             "full" => cb.set_reuse(ReuseConfigType::Full),
             "noreuse" => cb.set_reuse(ReuseConfigType::NoReuse),
@@ -43,23 +45,23 @@ impl Backend {
 
         // cb.log_with(blender_log);
 
-        let g = cb.build_local().unwrap();
+        let g = cb.start_simple().unwrap();
 
-        Backend { g: g }
+        Backend { g }
     }
 
     pub fn populate(&mut self, name: &'static str, mut records: Vec<Vec<DataType>>) -> usize {
-        let mut mutator = self.g.table(name).unwrap();
+        let mut mutator = self.g.table(name).unwrap().into_sync();
 
         let start = time::Instant::now();
 
         let i = records.len();
-        mutator.insert_all(records);
+        mutator.perform_all(records);
         // for r in records.drain(..) {
         //     mutator.insert(r).unwrap();
         // }
 
-        let dur = dur_to_fsec!(start.elapsed());
+        let dur = start.elapsed().as_float_secs();
         println!(
             "Inserted {} {} in {:.2}s ({:.2} PUTs/sec)!",
             i,
@@ -72,7 +74,9 @@ impl Backend {
     }
 
     fn login(&mut self, user_context: HashMap<String, DataType>) -> Result<(), String> {
-        self.g.create_universe(user_context.clone());
+        self.g
+            .on_worker(|w| w.create_universe(user_context.clone()))
+            .unwrap();
 
         Ok(())
     }
@@ -84,7 +88,7 @@ impl Backend {
         cf.read_to_string(&mut config).unwrap();
 
         // Install recipe with policies
-        self.g.set_security_config(config);
+        self.g.on_worker(|w| w.set_security_config(config)).unwrap();
     }
 
     fn migrate(&mut self, schema_file: &str, query_file: Option<&str>) -> Result<(), String> {
@@ -256,7 +260,7 @@ fn main() {
     backend.set_security_config(ploc);
     backend.migrate(sloc, Some(qloc)).unwrap();
 
-    let populate = match populate.as_ref() {
+    let populate = match populate {
         "before" => PopulateType::Before,
         "after" => PopulateType::After,
         _ => PopulateType::NoPopulate,
@@ -291,16 +295,16 @@ fn main() {
 
         // if partial, read 25% of the keys
         if partial && query_type == "posts" {
-            let leaf = format!("posts");
-            let mut getter = backend.g.view(&leaf).unwrap();
+            let leaf = "posts".to_string();
+            let mut getter = backend.g.view(&leaf).unwrap().into_sync();
             for author in 0..nusers / 4 {
                 getter.lookup(&[author.into()], false).unwrap();
             }
         }
 
         if partial && query_type == "post_count" {
-            let leaf = format!("post_count");
-            let mut getter = backend.g.view(&leaf).unwrap();
+            let leaf = "post_count".to_string();
+            let mut getter = backend.g.view(&leaf).unwrap().into_sync();
             for author in 0..nusers / 4 {
                 getter.lookup(&[author.into()], false).unwrap();
             }
@@ -317,20 +321,20 @@ fn main() {
         for i in 0..nlogged {
             let start = time::Instant::now();
             backend.login(make_user(i)).is_ok();
-            let dur = dur_to_fsec!(start.elapsed());
+            let dur = start.elapsed().as_float_secs();
             println!("Migration {} took {:.2}s!", i, dur,);
 
             // if partial, read 25% of the keys
             if partial && query_type == "posts" {
                 let leaf = format!("posts_u{}", i);
-                let mut getter = backend.g.view(&leaf).unwrap();
+                let mut getter = backend.g.view(&leaf).unwrap().into_sync();
                 for author in 0..nusers / 4 {
                     getter.lookup(&[author.into()], false).unwrap();
                 }
             }
             if partial && query_type == "post_count" {
                 let leaf = format!("post_count_u{}", i);
-                let mut getter = backend.g.view(&leaf).unwrap();
+                let mut getter = backend.g.view(&leaf).unwrap().into_sync();
                 for author in 0..nusers / 4 {
                     getter.lookup(&[author.into()], false).unwrap();
                 }
@@ -363,13 +367,12 @@ fn main() {
                             class_vec.push([class.clone()].to_vec());
                         }
                         let leaf = format!("posts_u{}", uid);
-                        let mut getter = backend.g.view(&leaf).unwrap();
+                        let mut getter = backend.g.view(&leaf).unwrap().into_sync();
                         let start = time::Instant::now();
                         let res = getter.multi_lookup(class_vec.clone(), true);
                         // println!("res: {:?}", res);
                         dur += start.elapsed();
-
-                    },
+                    }
                     None => println!("why isn't user {:?} enrolled", uid),
                 }
             }
@@ -392,27 +395,26 @@ fn main() {
                         }
                         let leaf = format!("post_count_u{}", uid);
 
-                        let mut getter = backend.g.view(&leaf).unwrap();
+                        let mut getter = backend.g.view(&leaf).unwrap().into_sync();
                         // println!("looking up vec: {:?}", class_vec);
                         let start = time::Instant::now();
                         let res = getter.multi_lookup(class_vec.clone(), true);
                         println!("res: {:?}", res);
                         dur += start.elapsed();
-
-                    },
+                    }
                     None => println!("why isn't user {:?} enrolled", uid),
                 }
             }
         }
 
-        let dur = dur_to_fsec!(dur);
+        let dur = dur.as_float_secs();
 
-        let num_at_once : i32 = nclasses;
+        let num_at_once: i32 = nclasses;
         println!(
             "Read {} keys in {:.2}s ({:.2} GETs/sec)!",
             num_at_once * nlogged,
             dur,
-            (num_at_once * nlogged) as f64 / dur,
+            f64::from(num_at_once * nlogged) / dur,
         );
 
         println!("Done with benchmark.");
@@ -441,8 +443,10 @@ fn main() {
                         match class_to_pub_posts.get_mut(&class.clone()) {
                             Some(count) => {
                                 *count += npub;
-                            },
-                            None => { insert = true; }
+                            }
+                            None => {
+                                insert = true;
+                            }
                         }
                         println!("updating class: {:?} posts: {:?}", class, npub);
                         if insert {
@@ -450,7 +454,7 @@ fn main() {
                         }
                         user_class_to_priv_posts.insert((uid, class), npriv);
                     }
-                },
+                }
                 None => println!("why isn't user {:?} enrolled in any classes?", uid),
             }
         }
@@ -459,20 +463,20 @@ fn main() {
         for i in 0..nlogged {
             let start = time::Instant::now();
             backend.login(make_user(i)).is_ok();
-            let dur = dur_to_fsec!(start.elapsed());
+            let dur = start.elapsed().as_float_secs();
             println!("Migration {} took {:.2}s!", i, dur,);
 
             // if partial, read 25% of the keys
             if partial && query_type == "posts" {
                 let leaf = format!("posts_u{}", i);
-                let mut getter = backend.g.view(&leaf).unwrap();
+                let mut getter = backend.g.view(&leaf).unwrap().into_sync();
                 for author in 0..nusers / 4 {
                     getter.lookup(&[author.into()], false).unwrap();
                 }
             }
             if partial && query_type == "post_count" {
                 let leaf = format!("post_count_u{}", i);
-                let mut getter = backend.g.view(&leaf).unwrap();
+                let mut getter = backend.g.view(&leaf).unwrap().into_sync();
                 for author in 0..nusers / 4 {
                     getter.lookup(&[author.into()], false).unwrap();
                 }
@@ -496,20 +500,18 @@ fn main() {
 
                     let leaf = format!("post_count_u{}", uid);
 
-                    let mut getter = backend.g.view(&leaf).unwrap();
+                    let mut getter = backend.g.view(&leaf).unwrap().into_sync();
                     println!("looking up vec: {:?}", class_vec);
                     let start = time::Instant::now();
                     let res = getter.multi_lookup(class_vec.clone(), true);
                     println!("results: {:?}", res);
                     println!("expected counts: {:?}", expected_count);
-                },
+                }
                 None => println!("why isn't user {:?} enrolled in any classes?", uid),
             }
         }
     }
-
 }
-
 
 // author version of post count query
 // if query_type == "post_count" {
@@ -532,8 +534,6 @@ fn main() {
 //         // println!("res: {:?}", res);
 //     }
 // }
-
-
 
 // if !partial && query_type == "post_count" {
 //     let mut authors = p.authors();

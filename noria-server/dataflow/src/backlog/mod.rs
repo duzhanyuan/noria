@@ -1,21 +1,24 @@
 use common::SizeOf;
 use fnv::FnvBuildHasher;
 use prelude::*;
-use std::borrow::Cow;
 use rand::{Rng, ThreadRng};
+use std::borrow::Cow;
 use std::sync::Arc;
-use std::sync::Mutex;
-use std::collections::HashMap;
 
 /// Allocate a new end-user facing result table.
-pub(crate) fn new(srmap: bool, cols: usize, key: &[usize], uid: usize) -> (SingleReadHandle, WriteHandle) {
+crate fn new(
+    srmap: bool,
+    cols: usize,
+    key: &[usize],
+    uid: usize,
+) -> (SingleReadHandle, WriteHandle) {
     new_inner(srmap, cols, key, None, uid)
 }
 
 /// Allocate a new partially materialized end-user facing result table.
 ///
 /// Misses in this table will call `trigger` to populate the entry, and retry until successful.
-pub(crate) fn new_partial<F>(
+crate fn new_partial<F>(
     srmap: bool,
     cols: usize,
     key: &[usize],
@@ -23,7 +26,7 @@ pub(crate) fn new_partial<F>(
     uid: usize,
 ) -> (SingleReadHandle, WriteHandle)
 where
-    F: Fn(&[DataType], Option<usize>) + 'static + Send + Sync,
+    F: Fn(&[DataType], Option<usize>) -> bool + 'static + Send + Sync,
 {
     new_inner(srmap, cols, key, Some(Arc::new(trigger)), uid)
 }
@@ -32,7 +35,7 @@ fn new_inner(
     srmap: bool,
     cols: usize,
     key: &[usize],
-    trigger: Option<Arc<Fn(&[DataType], Option<usize>) + Send + Sync>>,
+    trigger: Option<Arc<Fn(&[DataType], Option<usize>) -> bool + Send + Sync>>,
     uid: usize,
 ) -> (SingleReadHandle, WriteHandle) {
     let contiguous = {
@@ -50,13 +53,16 @@ fn new_inner(
         contiguous
     };
 
-    let mut srmap = true;
+    let srmap = true;
 
     macro_rules! make_srmap {
-    ($variant:tt) => {{
+        ($variant:tt) => {{
             use srmap;
             let (r, w) = srmap::construct(-1);
-            (multir_sr::Handle::$variant(r), multiw_sr::Handle::$variant(w))
+            (
+                multir_sr::Handle::$variant(r),
+                multiw_sr::Handle::$variant(w),
+            )
         }};
     }
 
@@ -87,23 +93,22 @@ fn new_inner(
             handleSR: Some(w),
             srmap: true,
             key: Vec::from(key),
-            cols: cols,
+            cols,
             contiguous,
             mem_size: 0,
-            uid: uid,
+            uid,
         };
 
         let r = SingleReadHandle {
             handle: None,
             handleSR: Some(r),
             srmap: true,
-            trigger: trigger,
+            trigger,
             key: Vec::from(key),
-            uid: uid
+            uid,
         };
 
         (r, w)
-
     } else {
         let (r, w) = match (key.len(), srmap) {
             (0, _) => unreachable!(),
@@ -119,19 +124,19 @@ fn new_inner(
             handleSR: None,
             srmap: false,
             key: Vec::from(key),
-            cols: cols,
+            cols,
             contiguous,
             mem_size: 0,
-            uid: uid,
+            uid,
         };
 
         let r = SingleReadHandle {
             handle: Some(r),
             handleSR: None,
             srmap: false,
-            trigger: trigger,
+            trigger,
             key: Vec::from(key),
-            uid: uid
+            uid,
         };
 
         (r, w)
@@ -139,11 +144,11 @@ fn new_inner(
 }
 
 mod multir;
-mod multiw;
 mod multir_sr;
+mod multiw;
 mod multiw_sr;
 
-fn key_to_single<'a>(k: Key<'a>) -> Cow<'a, DataType> {
+fn key_to_single(k: Key) -> Cow<DataType> {
     assert_eq!(k.len(), 1);
     match k {
         Cow::Owned(mut k) => Cow::Owned(k.swap_remove(0)),
@@ -151,7 +156,7 @@ fn key_to_single<'a>(k: Key<'a>) -> Cow<'a, DataType> {
     }
 }
 
-fn key_to_double<'a>(k: Key<'a>) -> Cow<'a, (DataType, DataType)> {
+fn key_to_double(k: Key) -> Cow<(DataType, DataType)> {
     assert_eq!(k.len(), 2);
     match k {
         Cow::Owned(k) => {
@@ -164,7 +169,7 @@ fn key_to_double<'a>(k: Key<'a>) -> Cow<'a, (DataType, DataType)> {
     }
 }
 
-pub(crate) struct WriteHandle {
+crate struct WriteHandle {
     handle: Option<multiw::Handle>,
     handleSR: Option<multiw_sr::Handle>,
     srmap: bool,
@@ -173,38 +178,38 @@ pub(crate) struct WriteHandle {
     key: Vec<usize>,
     contiguous: bool,
     mem_size: usize,
-    pub uid: usize
+    pub uid: usize,
 }
 
 type Key<'a> = Cow<'a, [DataType]>;
-pub(crate) struct MutWriteHandleEntry<'a> {
+crate struct MutWriteHandleEntry<'a> {
     handle: &'a mut WriteHandle,
     key: Key<'a>,
 }
-pub(crate) struct WriteHandleEntry<'a> {
+crate struct WriteHandleEntry<'a> {
     handle: &'a mut WriteHandle,
     key: Key<'a>,
 }
 
 impl<'a> MutWriteHandleEntry<'a> {
-    pub fn mark_filled(&mut self) {
+    crate fn mark_filled(&mut self) {
         let handle = &mut self.handle.handleSR;
         match handle {
             Some(hand) => {
-                if let Some((None, _)) = hand
-                    .meta_get_and(Cow::Borrowed(&*self.key), |rs| rs.is_empty())
+                if let Some((None, _)) =
+                    hand.meta_get_and(Cow::Borrowed(&*self.key), |rs| rs.is_empty())
                 {
                     hand.clear(Cow::Borrowed(&*self.key));
                 } else {
                     unreachable!("attempted to fill already-filled key");
                 }
                 hand.refresh();
-            },
+            }
             None => {}
         }
     }
 
-    pub fn mark_hole(&mut self) {
+    crate fn mark_hole(&mut self) {
         let handle = &mut self.handle.handleSR;
         println!("mark hole");
         match handle {
@@ -217,24 +222,20 @@ impl<'a> MutWriteHandleEntry<'a> {
                     .unwrap_or(0);
                 self.handle.mem_size = self.handle.mem_size.checked_sub(size as usize).unwrap();
                 hand.empty(Cow::Borrowed(&*self.key))
-            },
+            }
             None => {}
         }
     }
 }
 
 impl<'a> WriteHandleEntry<'a> {
-    pub(crate) fn try_find_and<F, T>(&mut
-         self, mut then: F) -> Result<(Option<T>, i64), ()>
+    crate fn try_find_and<F, T>(&mut self, mut then: F) -> Result<(Option<T>, i64), ()>
     where
         F: FnMut(&[Vec<DataType>]) -> T,
     {
-
         match &self.handle.handleSR {
-            Some(handleSR) => {
-                handleSR.meta_get_and(self.key.clone(), &mut then).ok_or(())
-            },
-            None => {Err(())}
+            Some(handleSR) => handleSR.meta_get_and(self.key.clone(), &mut then).ok_or(()),
+            None => Err(()),
         }
         // match &self.handle.handle {
         //     Some(handle) => {
@@ -260,7 +261,7 @@ where
     match record.into() {
         Cow::Owned(mut record) => {
             let mut i = 0;
-            let mut keep = key.into_iter().peekable();
+            let mut keep = key.iter().peekable();
             record.retain(|_| {
                 i += 1;
                 if let Some(&&next) = keep.peek() {
@@ -282,8 +283,10 @@ where
 }
 
 impl WriteHandle {
-
-    pub(crate) fn clone_new_user(&mut self, r: &mut SingleReadHandle) -> Option<(SingleReadHandle, WriteHandle)> {
+    crate fn clone_new_user(
+        &mut self,
+        r: &mut SingleReadHandle,
+    ) -> Option<(SingleReadHandle, WriteHandle)> {
         if self.srmap {
             let handle = &mut self.handleSR;
             match handle {
@@ -291,7 +294,7 @@ impl WriteHandle {
                     let (uid, r_handle, w_handle) = hand.clone_new_user();
                     // println!("CLONING NEW USER. uid: {}", uid);
                     let r = r.clone_new_user(r_handle, uid.clone());
-                    let w =  WriteHandle {
+                    let w = WriteHandle {
                         handle: None,
                         handleSR: Some(w_handle),
                         srmap: true,
@@ -300,18 +303,22 @@ impl WriteHandle {
                         key: self.key.clone(),
                         contiguous: self.contiguous.clone(),
                         mem_size: self.mem_size.clone(),
-                        uid: uid.clone()};
+                        uid: uid.clone(),
+                    };
                     return Some((r, w));
-                },
-                None => {None}
+                }
+                None => None,
             }
         } else {
             return None;
         }
     }
 
-
-    pub(crate) fn clone_new_user_partial(&mut self, r: &mut SingleReadHandle, trigger: Option<Arc<Fn(&[DataType], Option<usize>) + Send + Sync>>) -> Option<(SingleReadHandle, WriteHandle)> {
+    crate fn clone_new_user_partial(
+        &mut self,
+        r: &mut SingleReadHandle,
+        trigger: Option<Arc<Fn(&[DataType], Option<usize>) -> bool + Send + Sync>>,
+    ) -> Option<(SingleReadHandle, WriteHandle)> {
         if self.srmap {
             let handle = &mut self.handleSR;
             match handle {
@@ -319,7 +326,7 @@ impl WriteHandle {
                     let (uid, r_handle, w_handle) = hand.clone_new_user();
                     // println!("CLONING NEW USER. uid: {}", uid);
                     let r = r.clone_new_user_partial(r_handle, uid.clone(), trigger);
-                    let w =  WriteHandle {
+                    let w = WriteHandle {
                         handle: None,
                         handleSR: Some(w_handle),
                         srmap: true,
@@ -328,18 +335,18 @@ impl WriteHandle {
                         key: self.key.clone(),
                         contiguous: self.contiguous.clone(),
                         mem_size: self.mem_size.clone(),
-                        uid: uid.clone()};
+                        uid: uid.clone(),
+                    };
                     return Some((r, w));
-                },
-                None => {None}
+                }
+                None => None,
             }
         } else {
             return None;
         }
     }
 
-
-    pub(crate) fn clone(&mut self, r: &mut SingleReadHandle) -> Option<(SingleReadHandle, WriteHandle)> {
+    crate fn clone(&mut self, r: &mut SingleReadHandle) -> Option<(SingleReadHandle, WriteHandle)> {
         if self.srmap {
             let handle = &mut self.handleSR;
             match handle {
@@ -347,7 +354,7 @@ impl WriteHandle {
                     let w_handle = hand.clone();
                     match r.handleSR.clone() {
                         Some(rhand) => {
-                            let w =  WriteHandle {
+                            let w = WriteHandle {
                                 handle: None,
                                 handleSR: Some(w_handle),
                                 srmap: true,
@@ -356,22 +363,21 @@ impl WriteHandle {
                                 key: self.key.clone(),
                                 contiguous: self.contiguous.clone(),
                                 mem_size: self.mem_size.clone(),
-                                uid: self.uid.clone()};
+                                uid: self.uid.clone(),
+                            };
                             return Some((r.clone(rhand.clone(), self.uid.clone()), w));
-                        },
-                        None => {None}
+                        }
+                        None => None,
                     }
-                },
-                None => {None}
+                }
+                None => None,
             }
-
         } else {
             return None;
         }
     }
 
-
-    pub(crate) fn mut_with_key<'a, K>(&'a mut self, key: K) -> MutWriteHandleEntry<'a>
+    crate fn mut_with_key<'a, K>(&'a mut self, key: K) -> MutWriteHandleEntry<'a>
     where
         K: Into<Key<'a>>,
     {
@@ -381,7 +387,7 @@ impl WriteHandle {
         }
     }
 
-    pub(crate) fn with_key<'a, K>(&'a mut self, key: K) -> WriteHandleEntry<'a>
+    crate fn with_key<'a, K>(&'a mut self, key: K) -> WriteHandleEntry<'a>
     where
         K: Into<Key<'a>>,
     {
@@ -392,7 +398,7 @@ impl WriteHandle {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn mut_entry_from_record<'a, R>(&'a mut self, record: R) -> MutWriteHandleEntry<'a>
+    fn mut_entry_from_record<'a, R>(&'a mut self, record: R) -> MutWriteHandleEntry<'a>
     where
         R: Into<Cow<'a, [DataType]>>,
     {
@@ -400,7 +406,7 @@ impl WriteHandle {
         self.mut_with_key(key)
     }
 
-    pub(crate) fn entry_from_record<'a, R>(&'a mut self, record: R) -> WriteHandleEntry<'a>
+    crate fn entry_from_record<'a, R>(&'a mut self, record: R) -> WriteHandleEntry<'a>
     where
         R: Into<Cow<'a, [DataType]>>,
     {
@@ -408,18 +414,22 @@ impl WriteHandle {
         self.with_key(key)
     }
 
-    pub(crate) fn swap(&mut self) {
+    crate fn swap(&mut self) {
         if self.srmap {
             let handle = &mut self.handleSR;
             match handle {
-                Some(hand) => { hand.refresh(); },
-                None => {},
+                Some(hand) => {
+                    hand.refresh();
+                }
+                None => {}
             }
         } else {
             let handle = &mut self.handle;
             match handle {
-                Some(hand) => { hand.refresh(); },
-                None => {},
+                Some(hand) => {
+                    hand.refresh();
+                }
+                None => {}
             }
         }
     }
@@ -427,7 +437,7 @@ impl WriteHandle {
     /// Add a new set of records to the backlog.
     ///
     /// These will be made visible to readers after the next call to `swap()`.
-    pub(crate) fn add<I>(&mut self, rs: I, id: Option<usize>)
+    crate fn add<I>(&mut self, rs: I, id: Option<usize>)
     where
         I: IntoIterator<Item = Record>,
     {
@@ -445,8 +455,8 @@ impl WriteHandle {
                             .unwrap();
                     }
                     // hand.refresh();
-                },
-                None => {},
+                }
+                None => {}
             }
         } else {
             let handle = &mut self.handle;
@@ -461,19 +471,19 @@ impl WriteHandle {
                             .checked_sub(mem_delta.checked_abs().unwrap() as usize)
                             .unwrap();
                     }
-                },
-                None => {},
+                }
+                None => {}
             }
         }
     }
 
-    pub(crate) fn is_partial(&self) -> bool {
+    crate fn is_partial(&self) -> bool {
         self.partial
     }
 
     /// Evict `count` randomly selected keys from state and return them along with the number of
     /// bytes that will be freed once the underlying `evmap` applies the operation.
-    pub fn evict_random_key(&mut self, rng: &mut ThreadRng) -> u64 {
+    crate fn evict_random_key(&mut self, rng: &mut ThreadRng) -> u64 {
         if self.srmap {
             let handle = &mut self.handleSR;
             match handle {
@@ -487,7 +497,7 @@ impl WriteHandle {
                         match hand.empty_at_index(rng.gen()) {
                             None => (),
                             Some(vs) => {
-                                let size: u64 = vs.into_iter().map(|r| r.deep_size_of() as u64).sum();
+                                let size: u64 = vs.iter().map(|r| r.deep_size_of() as u64).sum();
                                 bytes_to_be_freed += size;
                             }
                         }
@@ -497,9 +507,8 @@ impl WriteHandle {
                             .unwrap();
                     }
                     bytes_to_be_freed
-
-                },
-                None => {0},
+                }
+                None => 0,
             }
         } else {
             let handle = &mut self.handle;
@@ -514,7 +523,8 @@ impl WriteHandle {
                         match hand.empty_at_index(rng.gen()) {
                             None => (),
                             Some(vs) => {
-                                let size: u64 = vs.into_iter().map(|r| r.deep_size_of() as u64).sum();
+                                let size: u64 =
+                                    vs.into_iter().map(|r| r.deep_size_of() as u64).sum();
                                 bytes_to_be_freed += size;
                             }
                         }
@@ -524,11 +534,9 @@ impl WriteHandle {
                             .unwrap();
                     }
                     bytes_to_be_freed
-
-                },
-                None => {0},
+                }
+                None => 0,
             }
-
         }
     }
 }
@@ -551,7 +559,7 @@ pub struct SingleReadHandle {
     handle: Option<multir::Handle>,
     handleSR: Option<multir_sr::Handle>,
     srmap: bool,
-    trigger: Option<Arc<Fn(&[DataType], Option<usize>) + Send + Sync>>,
+    trigger: Option<Arc<Fn(&[DataType], Option<usize>) -> bool + Send + Sync>>,
     key: Vec<usize>,
     pub uid: usize,
 }
@@ -559,50 +567,55 @@ pub struct SingleReadHandle {
 impl SingleReadHandle {
     pub fn clone_new_user(&mut self, r: multir_sr::Handle, uid: usize) -> SingleReadHandle {
         SingleReadHandle {
-           handle: None,
-           handleSR: Some(r),
-           srmap: true,
-           trigger: self.trigger.clone(),
-           key: self.key.clone(),
-           uid: uid.clone(),
-       }
+            handle: None,
+            handleSR: Some(r),
+            srmap: true,
+            trigger: self.trigger.clone(),
+            key: self.key.clone(),
+            uid: uid.clone(),
+        }
     }
 
-    pub fn clone_new_user_partial(&mut self, r: multir_sr::Handle, uid: usize, trigger: Option<Arc<Fn(&[DataType], Option<usize>) + Send + Sync>>) -> SingleReadHandle {
+    pub fn clone_new_user_partial(
+        &mut self,
+        r: multir_sr::Handle,
+        uid: usize,
+        trigger: Option<Arc<Fn(&[DataType], Option<usize>) -> bool + Send + Sync>>,
+    ) -> SingleReadHandle {
         SingleReadHandle {
-           handle: None,
-           handleSR: Some(r),
-           srmap: true,
-           trigger: trigger,
-           key: self.key.clone(),
-           uid: uid.clone(),
-       }
+            handle: None,
+            handleSR: Some(r),
+            srmap: true,
+            trigger: trigger,
+            key: self.key.clone(),
+            uid: uid.clone(),
+        }
     }
 
     pub fn clone(&mut self, r: multir_sr::Handle, uid: usize) -> SingleReadHandle {
         SingleReadHandle {
-           handle: None,
-           handleSR: Some(r),
-           srmap: true,
-           trigger: self.trigger.clone(),
-           key: self.key.clone(),
-           uid: uid.clone(),
-       }
+            handle: None,
+            handleSR: Some(r),
+            srmap: true,
+            trigger: self.trigger.clone(),
+            key: self.key.clone(),
+            uid: uid.clone(),
+        }
     }
 
-    pub fn universe(&self) -> usize{
-       self.uid.clone()
+    pub fn universe(&self) -> usize {
+        self.uid.clone()
     }
 
     /// Trigger a replay of a missing key from a partially materialized view.
-    pub fn trigger(&self, key: &[DataType], id: Option<usize>) {
+    pub fn trigger(&self, key: &[DataType], id: Option<usize>) -> bool {
         assert!(
             self.trigger.is_some(),
             "tried to trigger a replay for a fully materialized view"
         );
 
         // trigger a replay to populate
-        (*self.trigger.as_ref().unwrap())(key, id);
+        (*self.trigger.as_ref().unwrap())(key, id)
     }
 
     /// Find all entries that matched the given conditions.
@@ -613,7 +626,11 @@ impl SingleReadHandle {
     /// swapped in by the writer.
     ///
     /// Holes in partially materialized state are returned as `Ok((None, _))`.
-    pub fn try_find_and<F, T>(&mut self, key: &[DataType], mut then: F) -> Result<(Option<T>, i64), ()>
+    pub fn try_find_and<F, T>(
+        &mut self,
+        key: &[DataType],
+        mut then: F,
+    ) -> Result<(Option<T>, i64), ()>
     where
         F: FnMut(&[Vec<DataType>]) -> T,
     {
@@ -622,164 +639,53 @@ impl SingleReadHandle {
             let handle = &mut self.handleSR;
             match handle {
                 Some(hand) => {
-                    hand
-                    .meta_get_and(key, &mut then)
-                    .ok_or(())
-                    .map(|(mut records, meta)| {
-                        if records.is_none() && self.trigger.is_none() {
-                            records = Some(then(&[]));
-                        }
-                        (records, meta)
-                    })
-                },
-                None => {Err(())},
+                    hand.meta_get_and(key, &mut then)
+                        .ok_or(())
+                        .map(|(mut records, meta)| {
+                            if records.is_none() && self.trigger.is_none() {
+                                records = Some(then(&[]));
+                            }
+                            (records, meta)
+                        })
+                }
+                None => Err(()),
             }
         } else {
             let handle = &mut self.handle;
             match handle {
                 Some(hand) => {
-                    hand
-                    .meta_get_and(key, &mut then)
-                    .ok_or(())
-                    .map(|(mut records, meta)| {
-                        if records.is_none() && self.trigger.is_none() {
-                            records = Some(then(&[]));
-                        }
-                        (records, meta)
-                    })
-                },
-                None => {Err(())},
+                    hand.meta_get_and(key, &mut then)
+                        .ok_or(())
+                        .map(|(mut records, meta)| {
+                            if records.is_none() && self.trigger.is_none() {
+                                records = Some(then(&[]));
+                            }
+                            (records, meta)
+                        })
+                }
+                None => Err(()),
             }
         }
     }
 
-    #[allow(dead_code)]
-    pub fn len(&mut self) -> usize {
-        if self.srmap {
-            let handle = &mut self.handleSR;
-            match handle {
-                Some(hand) => {
-                    hand.len()
-                },
-                None => { 0 }
-            }
-        } else {
-            let handle = &mut self.handle;
-            match handle {
-                Some(hand) => {
-                    hand.len()
-                },
-                None => { 0 }
-            }
-        }
-    }
-
-    /// Count the number of rows in the reader.
-    /// This is a potentially very costly operation, since it will
-    /// hold up writers until all rows are iterated through.
-    pub fn count_rows(&self) -> usize {
-        let mut nrows = 0;
+    pub fn len(&self) -> usize {
         if self.srmap {
             let handle = &self.handleSR;
             match handle {
-                Some(hand) => {
-                    hand.for_each(|v| nrows += v.len());
-                    nrows
-                },
-                None => {0},
+                Some(hand) => hand.len(),
+                None => 0,
             }
         } else {
             let handle = &self.handle;
             match handle {
-                Some(hand) => {
-                    hand.for_each(|v| nrows += v.len());
-                    nrows
-                },
-                None => {0},
+                Some(hand) => hand.len(),
+                None => 0,
             }
         }
     }
-}
 
-#[derive(Clone)]
-pub enum ReadHandle {
-    Sharded(Vec<Option<SingleReadHandle>>),
-    Singleton(Option<SingleReadHandle>),
-}
-
-impl ReadHandle {
-    /// Find all entries that matched the given conditions.
-    ///
-    /// Returned records are passed to `then` before being returned.
-    ///
-    /// Note that not all writes will be included with this read -- only those that have been
-    /// swapped in by the writer.
-    ///
-    /// A hole in partially materialized state is returned as `Ok((None, _))`.
-    pub fn try_find_and<F, T>(&mut self, key: &[DataType], then: F) -> Result<(Option<T>, i64), ()>
-    where
-        F: FnMut(&[Vec<DataType>]) -> T,
-    {
-
-        match *self {
-            // ReadHandle::Sharded(ref mut shards) => {
-            //     assert_eq!(key.len(), 1);
-            //     match shards[::shard_by(&key[0], shards.len())] {
-            //         Some(ref mut inner) => {
-            //             inner.try_find_and(key, then)
-            //         },
-            //         None => {panic!("shouldn't happen")}
-            //     }
-            // }
-            ReadHandle::Singleton(ref mut srh) => {
-                match srh {
-                    Some(inner) => {
-                        let res = inner.try_find_and(key, then);
-                        res
-                    }
-                    _ => panic!("unimplemented"),
-                }
-            },
-            _ => panic!("can't get this to compile")
-        }
-    }
-
-    pub fn len(&mut self) -> usize {
-        match *self {
-            // ReadHandle::Sharded(ref shards) => {
-            //     shards.iter().map(|s| s.as_ref().unwrap().len()).sum()
-            // }
-            ReadHandle::Singleton(ref mut
-                srh) => {
-                match srh {
-                    Some(ref mut
-                        inner) => inner.len(),
-                    None => panic!("unimplemented"),
-                }
-            },
-            _ => panic!("couldn't get this to compile"),
-        }
-    }
-
-    pub fn set_single_handle(&mut self, shard: Option<usize>, handle: SingleReadHandle) {
-        match (self, shard) {
-            (&mut ReadHandle::Singleton(ref mut srh), None) => {
-                *srh = Some(handle);
-            }
-            (&mut ReadHandle::Sharded(ref mut rhs), None) => {
-                // when ::SHARDS == 1, sharded domains think they're unsharded
-                assert_eq!(rhs.len(), 1);
-                let srh = rhs.get_mut(0).unwrap();
-                assert!(srh.is_none());
-                *srh = Some(handle)
-            }
-            (&mut ReadHandle::Sharded(ref mut rhs), Some(shard)) => {
-                let srh = rhs.get_mut(shard).unwrap();
-                assert!(srh.is_none());
-                *srh = Some(handle)
-            }
-            _ => unreachable!(),
-        }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
     }
 }
 
@@ -810,13 +716,13 @@ mod tests {
 
         // but after the swap, the record is there!
         assert_eq!(r.try_find_and(&a[0..1], |rs| rs.len()).unwrap().0, Some(1));
-        assert!(
-            r.try_find_and(&a[0..1], |rs| rs
+        assert!(r
+            .try_find_and(&a[0..1], |rs| rs
                 .iter()
-                .any(|r| r[0] == a[0] && r[1] == a[1])).unwrap()
-            .0
+                .any(|r| r[0] == a[0] && r[1] == a[1]))
             .unwrap()
-        );
+            .0
+            .unwrap());
     }
 
     #[test]
@@ -856,13 +762,13 @@ mod tests {
         w.add(vec![Record::Positive(b.clone())]);
 
         assert_eq!(r.try_find_and(&a[0..1], |rs| rs.len()).unwrap().0, Some(1));
-        assert!(
-            r.try_find_and(&a[0..1], |rs| rs
+        assert!(r
+            .try_find_and(&a[0..1], |rs| rs
                 .iter()
-                .any(|r| r[0] == a[0] && r[1] == a[1])).unwrap()
-            .0
+                .any(|r| r[0] == a[0] && r[1] == a[1]))
             .unwrap()
-        );
+            .0
+            .unwrap());
     }
 
     #[test]
@@ -878,20 +784,20 @@ mod tests {
         w.add(vec![Record::Positive(c.clone())]);
 
         assert_eq!(r.try_find_and(&a[0..1], |rs| rs.len()).unwrap().0, Some(2));
-        assert!(
-            r.try_find_and(&a[0..1], |rs| rs
+        assert!(r
+            .try_find_and(&a[0..1], |rs| rs
                 .iter()
-                .any(|r| r[0] == a[0] && r[1] == a[1])).unwrap()
-            .0
+                .any(|r| r[0] == a[0] && r[1] == a[1]))
             .unwrap()
-        );
-        assert!(
-            r.try_find_and(&a[0..1], |rs| rs
+            .0
+            .unwrap());
+        assert!(r
+            .try_find_and(&a[0..1], |rs| rs
                 .iter()
-                .any(|r| r[0] == b[0] && r[1] == b[1])).unwrap()
-            .0
+                .any(|r| r[0] == b[0] && r[1] == b[1]))
             .unwrap()
-        );
+            .0
+            .unwrap());
     }
 
     #[test]
@@ -906,13 +812,13 @@ mod tests {
         w.swap();
 
         assert_eq!(r.try_find_and(&a[0..1], |rs| rs.len()).unwrap().0, Some(1));
-        assert!(
-            r.try_find_and(&a[0..1], |rs| rs
+        assert!(r
+            .try_find_and(&a[0..1], |rs| rs
                 .iter()
-                .any(|r| r[0] == b[0] && r[1] == b[1])).unwrap()
-            .0
+                .any(|r| r[0] == b[0] && r[1] == b[1]))
             .unwrap()
-        );
+            .0
+            .unwrap());
     }
 
     #[test]
@@ -931,7 +837,6 @@ mod tests {
         w2.add(b_rec.clone());
         w3.add(a_rec.clone());
 
-
         r1.try_find_and(&a[0..1], |rs| println!("Rs: {:?}", rs.clone()));
         r2.try_find_and(&a[0..1], |rs| println!("Rs: {:?}", rs.clone()));
         r3.try_find_and(&a[0..1], |rs| println!("Rs: {:?}", rs.clone()));
@@ -942,7 +847,6 @@ mod tests {
         // assert_eq!(r2.try_find_and(&a[0..1], |rs| rs.len()).unwrap().0, Some(1));
         // assert_eq!(r2.try_find_and(&b[0..1], |rs| rs.len()).unwrap().0, Some(1));
         // assert_eq!(r3.try_find_and(&b[0..1], |rs| rs.len()).unwrap().0, Some(0));
-
     }
 
     #[test]
@@ -958,13 +862,13 @@ mod tests {
         w.swap();
 
         assert_eq!(r.try_find_and(&a[0..1], |rs| rs.len()).unwrap().0, Some(1));
-        assert!(
-            r.try_find_and(&a[0..1], |rs| rs
+        assert!(r
+            .try_find_and(&a[0..1], |rs| rs
                 .iter()
-                .any(|r| r[0] == b[0] && r[1] == b[1])).unwrap()
-            .0
+                .any(|r| r[0] == b[0] && r[1] == b[1]))
             .unwrap()
-        );
+            .0
+            .unwrap());
     }
 
     #[test]
@@ -981,20 +885,20 @@ mod tests {
         w.swap();
 
         assert_eq!(r.try_find_and(&a[0..1], |rs| rs.len()).unwrap().0, Some(2));
-        assert!(
-            r.try_find_and(&a[0..1], |rs| rs
+        assert!(r
+            .try_find_and(&a[0..1], |rs| rs
                 .iter()
-                .any(|r| r[0] == a[0] && r[1] == a[1])).unwrap()
-            .0
+                .any(|r| r[0] == a[0] && r[1] == a[1]))
             .unwrap()
-        );
-        assert!(
-            r.try_find_and(&a[0..1], |rs| rs
+            .0
+            .unwrap());
+        assert!(r
+            .try_find_and(&a[0..1], |rs| rs
                 .iter()
-                .any(|r| r[0] == b[0] && r[1] == b[1])).unwrap()
-            .0
+                .any(|r| r[0] == b[0] && r[1] == b[1]))
             .unwrap()
-        );
+            .0
+            .unwrap());
 
         w.add(vec![
             Record::Negative(a.clone()),
@@ -1004,12 +908,12 @@ mod tests {
         w.swap();
 
         assert_eq!(r.try_find_and(&a[0..1], |rs| rs.len()).unwrap().0, Some(1));
-        assert!(
-            r.try_find_and(&a[0..1], |rs| rs
+        assert!(r
+            .try_find_and(&a[0..1], |rs| rs
                 .iter()
-                .any(|r| r[0] == b[0] && r[1] == b[1])).unwrap()
-            .0
+                .any(|r| r[0] == b[0] && r[1] == b[1]))
             .unwrap()
-        );
+            .0
+            .unwrap());
     }
 }

@@ -1,10 +1,10 @@
+use nom_sql::SqlQuery;
 use noria::{Modification, Operation, TableOperation};
 use prelude::*;
 use std::borrow::Cow;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use vec_map::VecMap;
-use nom_sql::SqlQuery;
 
 /// Base is used to represent the root nodes of the Noria data flow graph.
 ///
@@ -78,7 +78,7 @@ impl Base {
             .collect()
     }
 
-    pub fn fix(&self, row: &mut Vec<DataType>) {
+    crate fn fix(&self, row: &mut Vec<DataType>) {
         if self.unmodified {
             return;
         }
@@ -135,17 +135,16 @@ fn key_of<'a>(key_cols: &'a [usize], r: &'a TableOperation) -> impl Iterator<Ite
 }
 
 impl Base {
-    pub(crate) fn take(&mut self) -> Self {
+    pub(in crate::node) fn take(&mut self) -> Self {
         Clone::clone(self)
     }
 
-    pub(crate) fn process(
+    pub(in crate::node) fn process(
         &mut self,
         us: LocalNodeIndex,
         mut ops: Vec<TableOperation>,
         state: &StateMap,
     ) -> Records {
-
         if self.primary_key.is_none() || ops.is_empty() {
             return ops
                 .into_iter()
@@ -210,7 +209,7 @@ impl Base {
             let update = match op {
                 TableOperation::Insert(row) => {
                     if let Some(ref was) = was {
-                        // println!("base ignoring {:?} since it already has {:?}", row, was);
+                        println!("base ignoring {:?} since it already has {:?}", row, was);
                     } else {
                         //assert!(was.is_none());
                         current = Some(Cow::Owned(row));
@@ -277,7 +276,10 @@ impl Base {
         results.into()
     }
 
-    pub(crate) fn suggest_indexes(&self, n: NodeIndex) -> HashMap<NodeIndex, (Vec<usize>, bool)> {
+    pub(in crate::node) fn suggest_indexes(
+        &self,
+        n: NodeIndex,
+    ) -> HashMap<NodeIndex, (Vec<usize>, bool)> {
         if self.primary_key.is_some() {
             Some((n, (self.primary_key.as_ref().unwrap().clone(), true)))
                 .into_iter()
