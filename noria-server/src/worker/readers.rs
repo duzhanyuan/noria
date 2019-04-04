@@ -97,7 +97,7 @@ fn handle_message(
                 let mut readers_cache = readers_cache.borrow_mut();
                 let reader = readers_cache.entry(target).or_insert_with(|| {
                     let readers = s.lock().unwrap();
-                    readers.get(&target).unwrap().clone()
+                    readers[&target].clone()
                 });
 
                 // println!("handling message");
@@ -194,7 +194,7 @@ fn handle_message(
                 let mut readers_cache = readers_cache.borrow_mut();
                 let reader = readers_cache.entry(target).or_insert_with(|| {
                     let readers = s.lock().unwrap();
-                    readers.get(&target).unwrap().clone()
+                    readers[&target].clone()
                 });
 
                 reader.len()

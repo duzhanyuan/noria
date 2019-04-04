@@ -2123,24 +2123,16 @@ fn test_queries(test: &str, file: &'static str, shard: bool, reuse: bool, log: b
 
         // Add them one by one
         for (_i, q) in lines.iter().enumerate() {
-<<<<<<< HEAD:src/integration.rs
             //// println!("{}: {}", i, q);
             let or = r.clone();
-=======
-            //println!("{}: {}", i, q);
->>>>>>> 3272b3b37ba75c1730e6095c9090e8cc121bd776:noria-server/src/integration.rs
             r = match r.extend(q) {
                 Ok(mut nr) => {
                     assert!(nr.activate(mig).is_ok());
                     nr
                 }
                 Err(e) => {
-<<<<<<< HEAD:src/integration.rs
                     // println!("{:?}", e);
                     or
-=======
-                    panic!("{:?}", e);
->>>>>>> 3272b3b37ba75c1730e6095c9090e8cc121bd776:noria-server/src/integration.rs
                 }
             }
         }
@@ -2174,22 +2166,8 @@ fn finkelstein1982_queries() {
             .collect();
 
         // Add them one by one
-<<<<<<< HEAD:src/integration.rs
         for (_i, q) in lines.iter().enumerate() {
-            //// println!("{}: {}", i, q);
-            r = match r.extend(q) {
-                Ok(mut nr) => {
-                    assert!(nr.activate(mig).is_ok());
-                    nr
-                }
-                Err(e) => {
-                    panic!("{:?}", e);
-                }
-            }
-=======
-        for q in lines.iter() {
             assert!(inc.add_query(q, None, mig).is_ok());
->>>>>>> 3272b3b37ba75c1730e6095c9090e8cc121bd776:noria-server/src/integration.rs
         }
     });
 }
