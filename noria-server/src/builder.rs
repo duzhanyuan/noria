@@ -5,7 +5,6 @@ use crate::ReuseConfigType;
 use dataflow::PersistenceParameters;
 use failure;
 use noria::consensus::{Authority, LocalAuthority};
-use slog;
 use std::net::IpAddr;
 use std::sync::Arc;
 use std::time;
@@ -17,14 +16,12 @@ pub struct Builder {
     memory_limit: Option<usize>,
     memory_check_frequency: Option<time::Duration>,
     listen_addr: IpAddr,
-    log: slog::Logger,
 }
 impl Default for Builder {
     fn default() -> Self {
         Self {
             config: Config::default(),
             listen_addr: "127.0.0.1".parse().unwrap(),
-            log: slog::Logger::root(slog::Discard, o!()),
             memory_limit: None,
             memory_check_frequency: None,
         }
@@ -85,11 +82,6 @@ impl Builder {
         self.listen_addr = listen_addr;
     }
 
-    /// Set the logger that the derived worker should use. By default, it uses `slog::Discard`.
-    pub fn log_with(&mut self, log: slog::Logger) {
-        self.log = log;
-    }
-
     /// Set the reuse policy for all subsequent migrations
     pub fn set_reuse(&mut self, reuse_type: ReuseConfigType) {
         self.config.reuse = reuse_type;
@@ -111,11 +103,9 @@ impl Builder {
             ref config,
             memory_limit,
             memory_check_frequency,
-            ref log,
         } = *self;
 
         let config = config.clone();
-        let log = log.clone();
         future::lazy(move || {
             crate::startup::start_instance(
                 authority,
@@ -123,7 +113,6 @@ impl Builder {
                 config,
                 memory_limit,
                 memory_check_frequency,
-                log,
             )
         })
     }

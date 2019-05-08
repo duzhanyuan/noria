@@ -16,3 +16,4 @@ tower-balance = { git = "https://github.com/tower-rs/tower.git" }
 tower-buffer = { git = "https://github.com/tower-rs/tower.git" }
 tower-util = { git = "https://github.com/tower-rs/tower.git" }
 tower = { git = "https://github.com/tower-rs/tower.git" }
+tokio-trace-futures = { git = "https://github.com/tokio-rs/tokio-trace-nursery.git" }

@@ -78,28 +78,31 @@ pub(in crate::controller) struct DomainReplies(
 
 impl DomainReplies {
     fn read_n_domain_replies(&mut self, n: usize) -> Vec<ControlReplyPacket> {
-        let mut crps = Vec::with_capacity(n);
+        trace_span!({ n = n }, "waiting for domain replies").enter(|| {
+            let mut crps = Vec::with_capacity(n);
 
-        // TODO
-        // TODO: it's so stupid to spin here now...
-        // TODO
-        loop {
-            match self.0.poll() {
-                Ok(Async::NotReady) => thread::yield_now(),
-                Ok(Async::Ready(Some(crp))) => {
-                    crps.push(crp);
-                    if crps.len() == n {
-                        return crps;
+            // TODO
+            // TODO: it's so stupid to spin here now...
+            // TODO
+            loop {
+                match self.0.poll() {
+                    Ok(Async::NotReady) => thread::yield_now(),
+                    Ok(Async::Ready(Some(crp))) => {
+                        trace!({ n = crps.len() }, "got one more");
+                        crps.push(crp);
+                        if crps.len() == n {
+                            return crps;
+                        }
+                    }
+                    Ok(Async::Ready(None)) => {
+                        unreachable!("got unexpected EOF from domain reply channel");
+                    }
+                    Err(e) => {
+                        unimplemented!("failed to read control reply packet: {:?}", e);
                     }
                 }
-                Ok(Async::Ready(None)) => {
-                    unreachable!("got unexpected EOF from domain reply channel");
-                }
-                Err(e) => {
-                    unimplemented!("failed to read control reply packet: {:?}", e);
-                }
             }
-        }
+        })
     }
 
     pub(in crate::controller) fn wait_for_acks(&mut self, d: &DomainHandle) {
@@ -229,6 +232,7 @@ impl ControllerInner {
         }
 
         if self.pending_recovery.is_some() || self.workers.len() < self.quorum {
+            warn!("cannot respond to request as controller isn't ready");
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
 
@@ -319,11 +323,6 @@ impl ControllerInner {
         remote: &SocketAddr,
         read_listen_addr: SocketAddr,
     ) -> Result<(), io::Error> {
-        info!(
-            self.log,
-            "new worker registered from {:?}, which listens on {:?}", msg.source, remote
-        );
-
         let sender = TcpSender::connect(remote)?;
         let ws = Worker::new(sender);
         self.workers.insert(msg.source, ws);
@@ -335,15 +334,16 @@ impl ControllerInner {
                 assert_eq!(self.recipe.version(), 0);
                 assert!(recipe_version + 1 >= recipes.len());
 
-                info!(self.log, "Restoring graph configuration");
-                self.recipe = Recipe::with_version(
-                    recipe_version + 1 - recipes.len(),
-                    Some(self.log.clone()),
-                );
-                for r in recipes {
-                    self.apply_recipe(self.recipe.clone().extend(&r).unwrap())
-                        .unwrap();
-                }
+                warn_span!("finishing pending recovery").enter(|| {
+                    self.recipe = Recipe::with_version(
+                        recipe_version + 1 - recipes.len(),
+                        Some(self.log.clone()),
+                    );
+                    for r in recipes {
+                        self.apply_recipe(self.recipe.clone().extend(&r).unwrap())
+                            .unwrap();
+                    }
+                })
             }
         }
 
@@ -370,12 +370,19 @@ impl ControllerInner {
             let mut failed = Vec::new();
             for (addr, ws) in self.workers.iter_mut() {
                 if ws.healthy && ws.last_heartbeat.elapsed() > self.heartbeat_every * 3 {
-                    error!(self.log, "worker at {:?} has failed!", addr);
+                    error!(
+                        { addr = tokio_trace::field::debug(addr) },
+                        "worker has failed"
+                    );
                     ws.healthy = false;
                     failed.push(addr.clone());
                 }
             }
-            self.handle_failed_workers(failed);
+            warn_span!(
+                { failed = tokio_trace::field::debug(&failed) },
+                "handling worker failures"
+            )
+            .enter(|| self.handle_failed_workers(failed))
         }
     }
 
@@ -383,17 +390,29 @@ impl ControllerInner {
         // first, translate from the affected workers to affected data-flow nodes
         let mut affected_nodes = Vec::new();
         for wi in failed {
-            info!(self.log, "handling failure of worker {:?}", wi);
             affected_nodes.extend(self.get_failed_nodes(&wi));
         }
 
         // then, figure out which queries are affected (and thus must be removed and added again in
         // a migration)
+        trace!(
+            { nodes = tokio_trace::field::debug(&affected_nodes) },
+            "found failed nodes"
+        );
         let affected_queries = self.recipe.queries_for_nodes(affected_nodes);
+        trace!(
+            { queries = tokio_trace::field::debug(&affected_queries) },
+            "found failed queries"
+        );
         let (recovery, mut original) = self.recipe.make_recovery(affected_queries);
+        trace!(
+            { recipe = tokio_trace::field::debug(&recovery) },
+            "derived recovery recipe"
+        );
 
         // activate recipe
-        self.apply_recipe(recovery.clone())
+        debug_span!("applying recovery recipe")
+            .enter(|| self.apply_recipe(recovery.clone()))
             .expect("failed to apply recovery recipe");
 
         // we must do this *after* the migration, since the migration itself modifies the recipe in
@@ -404,17 +423,14 @@ impl ControllerInner {
         original.set_sql_inc(tmp.sql_inc().clone());
 
         // back to original recipe, which should add the query again
-        self.apply_recipe(original)
+        debug_span!("re-applying original recipe")
+            .enter(|| self.apply_recipe(original))
             .expect("failed to activate original recipe");
     }
 
     pub(super) fn handle_heartbeat(&mut self, msg: &CoordinationMessage) -> Result<(), io::Error> {
         match self.workers.get_mut(&msg.source) {
-            None => crit!(
-                self.log,
-                "got heartbeat for unknown worker {:?}",
-                msg.source
-            ),
+            None => crit!("got heartbeat for unknown worker"),
             Some(ref mut ws) => {
                 ws.last_heartbeat = Instant::now();
             }
@@ -547,6 +563,10 @@ impl ControllerInner {
         let mut wi = self.workers.iter_mut();
 
         // Send `AssignDomain` to each shard of the given domain
+        debug_span!(
+            { domain = domain.index.index() },
+            "distributing domain shards to workers"
+        ).enter(|| {
         for i in 0..num_shards.unwrap_or(1) {
             let nodes = if i == num_shards.unwrap_or(1) - 1 {
                 nodes.take().unwrap()
@@ -574,12 +594,9 @@ impl ControllerInner {
             };
 
             // send domain to worker
-            info!(
-                log,
-                "sending domain {}.{} to worker {:?}",
-                domain.index.index(),
-                domain.shard.unwrap_or(0),
-                w.sender.peer_addr()
+            debug!(
+                { shard = domain.shard.unwrap_or(0), worker = tokio_trace::field::debug(w.sender.peer_addr()) }
+                "assigned worker",
             );
             let src = w.sender.local_addr().unwrap();
             w.sender
@@ -592,6 +609,8 @@ impl ControllerInner {
 
             assignments.push(identifier);
         }
+
+        debug!("waiting for worker acknowledgements");
 
         // Wait for all the domains to acknowledge.
         let mut txs = HashMap::new();
@@ -617,6 +636,8 @@ impl ControllerInner {
             }
         }
 
+        debug!("announce that domain has booted");
+
         // Tell all workers about the new domain(s)
         // TODO(jon): figure out how much of the below is still true
         // TODO(malte): this is a hack, and not an especially neat one. In response to a
@@ -632,6 +653,7 @@ impl ControllerInner {
         // result of a nasty deadlock.)
         for endpoint in self.workers.values_mut() {
             for &dd in &announce {
+                trace!({ to = endpoint.sender.peer_addr() }, "announce");
                 endpoint
                     .sender
                     .send(CoordinationMessage {
@@ -642,6 +664,7 @@ impl ControllerInner {
                     .unwrap();
             }
         }
+        });
 
         let shards = assignments
             .into_iter()

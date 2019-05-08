@@ -65,22 +65,25 @@ pub(super) fn main<A: Authority + 'static>(
     descriptor: ControllerDescriptor,
     ctrl_rx: futures::sync::mpsc::UnboundedReceiver<Event>,
     cport: tokio::net::tcp::TcpListener,
-    log: slog::Logger,
     authority: Arc<A>,
     tx: futures::sync::mpsc::UnboundedSender<Event>,
 ) -> impl Future<Item = (), Error = ()> {
+    let span = info_span!("controller");
     let (dtx, drx) = futures::sync::mpsc::unbounded();
 
-    tokio::spawn(listen_domain_replies(valve, log.clone(), dtx, cport));
+    tokio::spawn(
+        listen_domain_replies(dtx, valve.wrap(cport.incoming()))
+            .map_err(|e| {
+                warn!({ err = e }, "domain reply connection failed");
+            })
+            .instrument(span),
+    );
 
     // note that we do not start up the data-flow until we find a controller!
 
-    let campaign = instance_campaign(tx.clone(), authority.clone(), descriptor, config);
-
-    let log = log;
+    let campaign =
+        span.enter(|| instance_campaign(tx.clone(), authority.clone(), descriptor, config));
     let authority = authority.clone();
-
-    let log2 = log.clone();
     let authority2 = authority.clone();
 
     // state that this instance will take if it becomes the controller
@@ -95,6 +98,7 @@ pub(super) fn main<A: Authority + 'static>(
                         unimplemented!();
                     }
                     CoordinationPayload::CreateUniverse(universe) => {
+                        debug!({ id = universe["id"] }, "asked to create universe");
                         if let Some(ref mut ctrl) = controller {
                             crate::block_on(|| ctrl.create_universe(universe).unwrap());
                         }
@@ -103,34 +107,44 @@ pub(super) fn main<A: Authority + 'static>(
                         ref addr,
                         ref read_listen_addr,
                         ..
-                    } => {
+                    } => debug_span!(
+                        { addr = tokio_trace::field::debug(addr) },
+                        "new worker registered"
+                    )
+                    .enter(|| {
                         if let Some(ref mut ctrl) = controller {
                             crate::block_on(|| {
                                 ctrl.handle_register(&msg, addr, read_listen_addr.clone())
                                     .unwrap()
                             });
                         }
-                    }
-                    CoordinationPayload::Heartbeat => {
+                    }),
+                    CoordinationPayload::Heartbeat => trace_span!(
+                        { addr = tokio_trace::field::debug(&msg.source) },
+                        "worker heartbeat"
+                    )
+                    .enter(|| {
                         if let Some(ref mut ctrl) = controller {
                             crate::block_on(|| ctrl.handle_heartbeat(&msg).unwrap());
                         }
-                    }
+                    }),
                     _ => unreachable!(),
                 },
                 Event::ExternalRequest(method, path, query, body, reply_tx) => {
-                    if let Some(ref mut ctrl) = controller {
-                        let authority = &authority;
-                        let reply = crate::block_on(|| {
-                            ctrl.external_request(method, path, query, body, &authority)
-                        });
+                    debug_span!({ method = method, path = path }, "external request").enter(|| {
+                        if let Some(ref mut ctrl) = controller {
+                            let authority = &authority;
+                            let reply = crate::block_on(|| {
+                                ctrl.external_request(method, path, query, body, &authority)
+                            });
 
-                        if reply_tx.send(reply).is_err() {
-                            warn!(log, "client hung up");
+                            if reply_tx.send(reply).is_err() {
+                                warn!("client hung up");
+                            }
+                        } else if reply_tx.send(Err(StatusCode::NOT_FOUND)).is_err() {
+                            warn!("client hung up for 404");
                         }
-                    } else if reply_tx.send(Err(StatusCode::NOT_FOUND)).is_err() {
-                        warn!(log, "client hung up for 404");
-                    }
+                    })
                 }
                 #[cfg(test)]
                 Event::ManualMigration { f, done } => {
@@ -156,12 +170,13 @@ pub(super) fn main<A: Authority + 'static>(
                         )
                         .unwrap();
                 }
-                Event::WonLeaderElection(state) => {
-                    let c = campaign.take().unwrap();
-                    crate::block_on(move || c.join().unwrap());
-                    let drx = drx.take().unwrap();
-                    controller = Some(ControllerInner::new(log.clone(), state.clone(), drx));
-                }
+                Event::WonLeaderElection(state) => debug_span!({ path = path }, "won_election")
+                    .enter(|| {
+                        let c = campaign.take().unwrap();
+                        crate::block_on(move || c.join().unwrap());
+                        let drx = drx.take().unwrap();
+                        controller = Some(ControllerInner::new(log.clone(), state.clone(), drx))
+                    }),
                 Event::CampaignError(e) => {
                     panic!("{:?}", e);
                 }
@@ -171,45 +186,38 @@ pub(super) fn main<A: Authority + 'static>(
         })
         .and_then(move |controller| {
             // shutting down
+            info!("controller shutting down");
             if controller.is_some() {
                 if let Err(e) = authority2.surrender_leadership() {
-                    error!(log2, "failed to surrender leadership");
-                    eprintln!("{:?}", e);
+                    warn!({ err = e }, "failed to surrender leadership");
                 }
             }
             Ok(())
         })
         .map_err(|e| panic!("{:?}", e))
+        .instrument(span)
 }
 
 fn listen_domain_replies(
-    valve: &Valve,
-    log: slog::Logger,
     reply_tx: UnboundedSender<ControlReplyPacket>,
-    on: tokio::net::TcpListener,
-) -> impl Future<Item = (), Error = ()> {
-    let valve = valve.clone();
-    valve
-        .wrap(on.incoming())
-        .map_err(failure::Error::from)
-        .for_each(move |sock| {
-            tokio::spawn(
-                valve
-                    .wrap(AsyncBincodeReader::from(sock))
-                    .map_err(failure::Error::from)
-                    .forward(
-                        reply_tx
-                            .clone()
-                            .sink_map_err(|_| format_err!("main event loop went away")),
-                    )
-                    .map(|_| ())
-                    .map_err(|e| panic!("{:?}", e)),
-            );
-            Ok(())
-        })
-        .map_err(move |e| {
-            warn!(log, "domain reply connection failed: {:?}", e);
-        })
+    on: Valved<tokio::net::tcp::Incoming>,
+) -> impl Future<Item = (), Error = failure::Error> {
+    on.map_err(failure::Error::from).for_each(move |sock| {
+        tokio::spawn(
+            valve
+                .wrap(AsyncBincodeReader::from(sock))
+                .map_err(failure::Error::from)
+                .forward(
+                    reply_tx
+                        .clone()
+                        .sink_map_err(|_| format_err!("main event loop went away")),
+                )
+                .map(|_| ())
+                .map_err(|e| panic!("{:?}", e))
+                .instrument(debug_span!("domain_replies")),
+        );
+        Ok(())
+    })
 }
 
 fn instance_campaign<A: Authority + 'static>(
@@ -234,15 +242,19 @@ fn instance_campaign<A: Authority + 'static>(
             // leader, notifying the main thread every time a leader change occurs.
             let mut epoch;
             if let Some(leader) = authority.try_get_leader()? {
+                let event = payload_to_event(leader.1)?;
                 epoch = leader.0;
+                debug!({ epoch = epoch, event = event }, "found new leader");
                 event_tx = event_tx
-                    .send(payload_to_event(leader.1)?)
+                    .send()
                     .wait()
                     .map_err(|_| format_err!("send failed"))?;
                 while let Some(leader) = authority.await_new_epoch(epoch)? {
+                    let event = payload_to_event(leader.1)?;
                     epoch = leader.0;
+                    debug!({ epoch = epoch, event = event }, "found replacement leader");
                     event_tx = event_tx
-                        .send(payload_to_event(leader.1)?)
+                        .send()
                         .wait()
                         .map_err(|_| format_err!("send failed"))?;
                 }
@@ -256,6 +268,7 @@ fn instance_campaign<A: Authority + 'static>(
                 Some(epoch) => epoch,
                 None => continue,
             };
+            info!({ epoch = epoch }, "became the leader");
             let state = authority.read_modify_write(
                 STATE_KEY,
                 |state: Option<ControllerState>| match state {
@@ -295,12 +308,16 @@ fn instance_campaign<A: Authority + 'static>(
         }
     };
 
+    let span = debug_span!("campaign");
     thread::Builder::new()
         .name("srv-zk".to_owned())
         .spawn(move || {
-            if let Err(e) = campaign_inner(event_tx.clone()) {
-                let _ = event_tx.send(Event::CampaignError(e));
-            }
+            span.enter(|| {
+                if let Err(e) = campaign_inner(event_tx.clone()) {
+                    warn!({ err = e }, "campaign failed");
+                    let _ = event_tx.send(Event::CampaignError(e));
+                }
+            })
         })
         .unwrap()
 }

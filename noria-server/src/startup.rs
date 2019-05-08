@@ -71,7 +71,6 @@ pub(super) fn start_instance<A: Authority + 'static>(
     config: Config,
     memory_limit: Option<usize>,
     memory_check_frequency: Option<time::Duration>,
-    log: slog::Logger,
 ) -> impl Future<Item = Handle<A>, Error = failure::Error> {
     let mut pool = tokio_io_pool::Builder::default();
     pool.name_prefix("io-worker-");
@@ -111,14 +110,15 @@ pub(super) fn start_instance<A: Authority + 'static>(
     let (worker_tx, worker_rx) = futures::sync::mpsc::unbounded();
 
     // spawn all of those
-    tokio::spawn(listen_internal(&valve, log.clone(), tx.clone(), wport));
-    let ext_log = log.clone();
     tokio::spawn(
-        listen_external(tx.clone(), valve.wrap(xport.incoming()), authority.clone()).map_err(
-            move |e| {
-                warn!(ext_log, "external request failed: {:?}", e);
-            },
-        ),
+        listen_internal(tx.clone(), valve.wrap(wport.incoming())).map_err(|e| {
+            warn!({ err = e }, "internal connection failed");
+        }),
+    );
+    tokio::spawn(
+        listen_external(tx.clone(), valve.wrap(xport.incoming()), authority.clone()).map_err(|e| {
+            warn!({ err = e }, "external connection failed");
+        }),
     );
 
     // first, a loop that just forwards to the appropriate place
@@ -169,7 +169,6 @@ pub(super) fn start_instance<A: Authority + 'static>(
         descriptor,
         ctrl_rx,
         cport,
-        log.clone(),
         authority.clone(),
         tx.clone(),
     ));
@@ -180,41 +179,31 @@ pub(super) fn start_instance<A: Authority + 'static>(
         waddr,
         memory_limit,
         memory_check_frequency,
-        log.clone(),
     ));
 
     future::Either::B(Handle::new(authority, tx, trigger, iopool))
 }
 
 fn listen_internal(
-    valve: &Valve,
-    log: slog::Logger,
+    on: Valved<tokio::net::tcp::Incoming>,
     event_tx: UnboundedSender<Event>,
-    on: tokio::net::TcpListener,
-) -> impl Future<Item = (), Error = ()> {
-    let valve = valve.clone();
-    valve
-        .wrap(on.incoming())
-        .map_err(failure::Error::from)
-        .for_each(move |sock| {
-            tokio::spawn(
-                valve
-                    .wrap(AsyncBincodeReader::from(sock))
-                    .map(Event::InternalMessage)
-                    .map_err(failure::Error::from)
-                    .forward(
-                        event_tx
-                            .clone()
-                            .sink_map_err(|_| format_err!("main event loop went away")),
-                    )
-                    .map(|_| ())
-                    .map_err(|e| panic!("{:?}", e)),
-            );
-            Ok(())
-        })
-        .map_err(move |e| {
-            warn!(log, "internal connection failed: {:?}", e);
-        })
+) -> impl Future<Item = (), Error = failure::Error> {
+    on.map_err(failure::Error::from).for_each(move |sock| {
+        tokio::spawn(
+            valve
+                .wrap(AsyncBincodeReader::from(sock))
+                .map(Event::InternalMessage)
+                .map_err(failure::Error::from)
+                .forward(
+                    event_tx
+                        .clone()
+                        .sink_map_err(|_| format_err!("main event loop went away")),
+                )
+                .map(|_| ())
+                .map_err(|e| panic!("{:?}", e)),
+        );
+        Ok(())
+    })
 }
 
 struct ExternalServer<A: Authority>(UnboundedSender<Event>, Arc<A>);

@@ -45,33 +45,30 @@ pub struct ZookeeperAuthority {
 impl ZookeeperAuthority {
     /// Create a new instance.
     pub fn new(connect_string: &str) -> Result<Self, Error> {
-        let zk = ZooKeeper::connect(connect_string, Duration::from_secs(1), EventWatcher).context(
-            format!(
+        let s = debug_span!("connecting to zookeeper", addr = connect_string);
+        let zk = s
+            .enter(|| ZooKeeper::connect(connect_string, Duration::from_secs(1), EventWatcher))
+            .context(format!(
                 "Failed to connect to ZooKeeper at {}. Do you have \"maxClientCnxns\" set \
                  correctly in /etc/zookeeper/conf/zoo.conf?",
                 connect_string
-            ),
-        )?;
-        let _ = zk.create(
-            "/",
-            vec![],
-            Acl::open_unsafe().clone(),
-            CreateMode::Persistent,
-        );
-        Ok(Self {
-            zk,
-            log: slog::Logger::root(slog::Discard, o!()),
-        })
-    }
-
-    /// Enable logging
-    pub fn log_with(&mut self, log: slog::Logger) {
-        self.log = log;
+            ))?;
+        s.enter(|| {
+            trace!(s, "creating /");
+            let _ = zk.create(
+                "/",
+                vec![],
+                Acl::open_unsafe().clone(),
+                CreateMode::Persistent,
+            );
+        });
+        Ok(Self { zk })
     }
 }
 
 impl Authority for ZookeeperAuthority {
     fn become_leader(&self, payload_data: Vec<u8>) -> Result<Option<Epoch>, Error> {
+        trace!("attempting to become the controller");
         let path = match self.zk.create(
             CONTROLLER_KEY,
             payload_data.clone(),
@@ -83,40 +80,44 @@ impl Authority for ZookeeperAuthority {
             Err(e) => bail!(e),
         };
 
+        trace!("became the ZooKeeper leader; fetching old controller's data");
         let (ref current_data, ref stat) = self.zk.get_data(&path, false)?;
         if *current_data == payload_data {
-            info!(self.log, "became leader at epoch {}", stat.czxid);
+            debug!({ epoch = stat.czxid }, "became the controller");
             Ok(Some(Epoch(stat.czxid)))
         } else {
+            trace!("another controller replaced us");
             Ok(None)
         }
     }
 
     fn surrender_leadership(&self) -> Result<(), Error> {
+        debug!("surrendering controller status");
         self.zk.delete(CONTROLLER_KEY, None)?;
         Ok(())
     }
 
     fn get_leader(&self) -> Result<(Epoch, Vec<u8>), Error> {
-        loop {
+        debug_span!("looking for a controller").enter(|| loop {
+            trace!("checking for current controller");
             match self.zk.get_data(CONTROLLER_KEY, false) {
                 Ok((data, stat)) => return Ok((Epoch(stat.czxid), data)),
                 Err(ZkError::NoNode) => {}
                 Err(e) => bail!(e),
             };
 
+            trace!("adding watch for new controller appearing");
             match self.zk.exists_w(CONTROLLER_KEY, UnparkWatcher::new()) {
-                Ok(_) => {}
+                Ok(_) => {
+                    trace!("a controller seems to have appeared");
+                }
                 Err(ZkError::NoNode) => {
-                    warn!(
-                        self.log,
-                        "no controller present, waiting for one to appear..."
-                    );
+                    trace!("watch added; waiting");
                     thread::park_timeout(Duration::from_secs(60))
                 }
                 Err(e) => bail!(e),
             }
-        }
+        })
     }
 
     fn try_get_leader(&self) -> Result<Option<(Epoch, Vec<u8>)>, Error> {
@@ -130,23 +131,31 @@ impl Authority for ZookeeperAuthority {
     fn await_new_epoch(&self, current_epoch: Epoch) -> Result<Option<(Epoch, Vec<u8>)>, Error> {
         let is_new_epoch = |stat: &Stat| stat.czxid > current_epoch.0;
 
-        loop {
+        trace_span!({ from: current_epoch.0 }, "waiting for epoch to roll over").enter(|| loop {
+            trace!("checking for current controller");
             match self.zk.get_data(CONTROLLER_KEY, false) {
-                Ok((_, ref stat)) if !is_new_epoch(stat) => {}
+                Ok((_, ref stat)) if !is_new_epoch(stat) => {
+                    trace!("epoch unchanged");
+                }
                 Ok((data, stat)) => return Ok(Some((Epoch(stat.czxid), data))),
                 Err(ZkError::NoNode) => return Ok(None),
                 Err(e) => bail!(e),
             };
 
+            trace!("adding watch for controller change");
             match self.zk.exists_w(CONTROLLER_KEY, UnparkWatcher::new()) {
                 Ok(Some(ref stat)) if is_new_epoch(stat) => {}
-                Ok(_) | Err(ZkError::NoNode) => thread::park_timeout(Duration::from_secs(60)),
+                Ok(_) | Err(ZkError::NoNode) => {
+                    trace!("watch added; waiting");
+                    thread::park_timeout(Duration::from_secs(60))
+                }
                 Err(e) => bail!(e),
             }
-        }
+        })
     }
 
     fn try_read(&self, path: &str) -> Result<Option<Vec<u8>>, Error> {
+        trace!({ path = path }, "attempt ZooKeeper read");
         match self.zk.get_data(path, false) {
             Ok((data, _)) => Ok(Some(data)),
             Err(ZkError::NoNode) => Ok(None),
@@ -159,44 +168,58 @@ impl Authority for ZookeeperAuthority {
         F: FnMut(Option<P>) -> Result<P, E>,
         P: Serialize + DeserializeOwned,
     {
-        loop {
+        trace_span!({ path = path }, "attempt ZooKeeper RMW").enter(|| loop {
+            trace!("read ZooKeeper value");
             match self.zk.get_data(path, false) {
                 Ok((data, stat)) => {
+                    trace!("got value");
                     let p = serde_json::from_slice(&data)?;
                     let result = f(Some(p));
                     if result.is_err() {
+                        trace!("closure aborted operation");
                         return Ok(result);
                     }
 
+                    trace!("attempting to write back modified value");
                     match self.zk.set_data(
                         path,
                         serde_json::to_vec(result.as_ref().ok().unwrap())?,
                         Some(stat.version),
                     ) {
-                        Err(ZkError::NoNode) | Err(ZkError::BadVersion) => continue,
+                        Err(ZkError::NoNode) | Err(ZkError::BadVersion) => {
+                            trace!("node changed; retrying");
+                            continue;
+                        }
                         Ok(_) => return Ok(result),
                         Err(e) => bail!(e),
                     };
                 }
                 Err(ZkError::NoNode) => {
+                    trace!("no value exists");
                     let result = f(None);
                     if result.is_err() {
+                        trace!("closure aborted operation");
                         return Ok(result);
                     }
+
+                    trace!("attempting to write closure value");
                     match self.zk.create(
                         path,
                         serde_json::to_vec(result.as_ref().ok().unwrap())?,
                         Acl::open_unsafe().clone(),
                         CreateMode::Persistent,
                     ) {
-                        Err(ZkError::NodeExists) => continue,
+                        Err(ZkError::NodeExists) => {
+                            trace!("node was already added; retrying");
+                            continue;
+                        }
                         Ok(_) => return Ok(result),
                         Err(e) => bail!(e),
                     }
                 }
                 Err(e) => bail!(e),
             }
-        }
+        })
     }
 }
 

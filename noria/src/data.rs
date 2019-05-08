@@ -39,6 +39,22 @@ pub enum DataType {
     Timestamp(NaiveDateTime),
 }
 
+impl tokio_trace::Value for DataType {
+    fn record(&self, key: &tokio_trace::field::Field, visitor: &mut tokio_trace::field::Visit) {
+        match *self {
+            DataType::None => visitor.record_debug(key, &None::<()>),
+            DataType::Text(..) | DataType::TinyText(..) => {
+                let text: Cow<str> = self.into();
+                visitor.record_str(key, text)
+            }
+            DataType::Int(n) => visitor.record_i64(key, n),
+            DataType::BigInt(n) => visitor.record_i64(key, n),
+            DataType::Real(..) => visitor.record_debug(key, self),
+            DataType::Timestamp(ts) => visitor.record_str(key, ts.format("%c")),
+        }
+    }
+}
+
 impl fmt::Display for DataType {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match *self {
